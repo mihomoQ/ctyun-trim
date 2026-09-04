@@ -2,8 +2,11 @@
 
 The default `MinimalInterop` profile encodes the component boundary established from one observed CTyun Windows image. Its normalized content hash is pinned in code. Every destructive match requires an exact object name and full canonical image path. Unknown versions fail closed.
 
-Apply also authenticates the preserved core before making changes: four service ImagePaths, three driver ImagePaths, valid pre-cleanup Authenticode signatures, and the observed `clipa` numeric file version `2.1.0.0` must match the versioned fingerprint.
-The first run archives each core file's SHA-256 in a hashed, ACL-protected baseline report. A Prepare-to-Apply resume must match those exact bytes, even if the current signature still validates.
+Apply also authenticates the preserved core before making changes: four service ImagePaths, three driver ImagePaths, source ACLs, per-entry signature policies, and the observed `clipa` numeric file version `2.1.0.0` must match the versioned fingerprint. Every core entry except `BalloonService` requires a valid pre-cleanup Authenticode chain.
+
+The observed `BalloonService` binary is signed by a self-issued Red Hat virtio-win development certificate that Windows does not trust. CTyunTrim does not add that certificate to a trust store. Instead, only this exact service is accepted when its canonical path, file SHA-256, embedded signer thumbprint, signer subject and signer issuer all match the immutable profile and the signature status is exactly `Valid` or the observed untrusted-root `UnknownError`. A hash, signer, path or status change fails closed.
+
+The first run archives each core file's SHA-256 and signer identity in a hashed, ACL-protected baseline report. A Prepare-to-Apply resume must match those exact bytes and signer. For `AuthenticodeValidAtBaseline` entries, current validity remains mandatory until the protected journal contains a completed removal operation for an immutable known-certificate target. Only after that durable boundary may `UnknownError` or `NotTrusted` be accepted, and then only with exact baseline byte and signer continuity. A merely pending write-ahead record or an unknown certificate target cannot relax trust. `HashMismatch`, `NotSigned`, `NotSupported`, `Incompatible`, a missing signer or an unsafe ACL always fails.
 
 ## Preserved core
 

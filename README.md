@@ -5,7 +5,7 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.1-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
+当前状态：**Experimental / 0.1.2-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
 
 ## 项目目标
 
@@ -14,7 +14,7 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 - 完整移除本项目使用场景不需要的 `cloudbase-init` 服务、账户、Profile 和程序。
 - 默认只审计；变更前备份；程序文件先移动到隔离区，而不是直接粉碎。
 - 未识别环境、路径冲突、已有未知 IFEO、签名异常时停止，不猜测、不模糊删除。
-- `Apply` 只接受内置清单的规范化 SHA-256，并核对核心服务/驱动的精确 `ImagePath`、签名以及 `clipa 2.1.0.0` 指纹；Prepare 还会固化核心文件 SHA-256，后续续跑不允许悄悄换件，不同镜像默认拒绝执行。
+- `Apply` 只接受内置清单的规范化 SHA-256，并核对核心服务/驱动的精确 `ImagePath`、来源 ACL、签名策略以及 `clipa 2.1.0.0` 指纹；Prepare 还会固化核心文件 SHA-256 和签名者，后续续跑不允许悄悄换件，不同镜像默认拒绝执行。
 
 CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 ReviOS Playbook。
 
@@ -31,6 +31,8 @@ CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 Re
 | 必要驱动 | `CLINKAC`、`ClinkMouseFilter`、`WinDivertScanner`、`WinDivert64.sys` | 输入或网络辅助 |
 
 “保留”仅表示功能需要，不表示这些高权限厂商组件可信、无风险或不具备管理能力。
+
+参考镜像的 `BalloonService` 使用 Red Hat virtio-win 开发证书自签，Windows 返回不受信任根。CTyunTrim 不安装或信任该根证书，而只对这一服务接受内置的精确文件 SHA-256 与嵌入签名者组合；其他核心文件仍必须在清理前通过正常的 Authenticode 信任验证。建立受保护基线后，普通核心文件仍须保持 `Valid`，直到当前 RunId 已经留下完成移除至少一张清单内证书的持久日志；只有越过该边界后，才允许证书链降级，并且仍要求与基线逐字节、签名者完全一致且不存在 `HashMismatch`、`NotSigned` 等破坏状态。仅有写前 `Pending` 日志或未知证书目标都不能放宽信任。
 
 以下对象有硬保护：
 
@@ -121,7 +123,7 @@ Diagnostic 导出要求 64 位管理员 Windows PowerShell 5.1，并固定写入
 
 ### 恢复
 
-Apply 会返回 `RunId` 和备份目录。0.1.1 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
+Apply 会返回 `RunId` 和备份目录。0.1.2 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
 
 ## 与 ReviOS 配合
 

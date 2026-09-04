@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2-Diagnostic - 2026-09-04
+
+- Added an exact `PinnedHashAndSigner` trust policy for the observed VirtIO `BalloonService` binary whose Red Hat development certificate chains to an untrusted self-issued root.
+- Pinned the Balloon executable SHA-256, embedded signer thumbprint, subject, issuer, service name and canonical image path; no certificate is installed or trusted system-wide.
+- Kept `AuthenticodeValidAtBaseline` mandatory before cleanup for every other preserved service and driver; later runs require exact protected-baseline hash and signer continuity when deliberate certificate removal changes chain trust.
+- Added locked double-hash core evidence collection, source ACL checks, signer continuity across the protected baseline, and fail-closed trust-policy tests.
+- Phase-gated ordinary signature trust degradation on durable certificate-removal journal evidence; Prepare and pre-certificate resume still require `Valid`.
+- Revalidated the newly written baseline against live core evidence before either Prepare or Apply can change the system.
+- Added sanitized trust-policy Booleans to diagnostics without exposing file hashes or signer identities.
+- Fixed localized Windows architecture values being reported as `Unknown` in diagnostic bundles.
+- Made requested read-only/WhatIf diagnostic export failures return a failing exit status while preserving successful real Prepare/Apply status to prevent destructive replay.
+- Added strict release source/staging/ZIP file-set and per-entry hash validation.
+
 ## 0.1.1-Diagnostic - 2026-09-04
 
 - Added the opt-in `-Diagnostic` modifier without forking the destructive execution path.

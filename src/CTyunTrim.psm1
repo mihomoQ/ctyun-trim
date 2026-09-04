@@ -3,11 +3,20 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.1-Diagnostic'
+$script:CTyunTrimVersion = '0.1.2-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
-$script:ApprovedManifestSha256 = 'CE710D54CB8DBCCEC202F0300EAEDA6924AEEEBAEFD040D62CC99CC0ADAFF5F3'
+$script:ApprovedManifestSha256 = 'A10C030E27242D10D165EB4F2B2F06654B2346B3057733C8A33D8A7C8CE210D8'
+$script:ApprovedCoreProfileVersion = 'ctyun-win11-26100-26200-clipa-2.1.0.0-balloon-1b821f55'
+$script:ApprovedPinnedCoreIdentity = @{
+    Name                     = 'BalloonService'
+    ExpectedImage            = 'C:\Program Files (x86)\ctyun\clink\drivers\Balloon\blnsvr.exe'
+    ExpectedSha256           = '1B821F556FFC8F998196CDBFEE6D84846600D39EB1B584D182BFCC5AB6DFCD4E'
+    ExpectedSignerThumbprint = '301C73596BAC4FE8EE33487687BD75FCC307FFC6'
+    ExpectedSignerSubject    = 'CN=Red Hat Inc., OU=Dev, O=virtio-win'
+    ExpectedSignerIssuer     = 'CN=Red Hat Inc., OU=Dev, O=virtio-win'
+}
 # Microsoft Security Compliance Toolkit LGPO.zip, download id 55319.
 # Package SHA256: CB7159D134A0A1E7B1ED2ADA9A3CE8CE8F4DE391D14403D55438AF824247CC55
 $script:ApprovedLgpoSha256 = @('0C97F29543418B30340C4FF5D930D31E6196DD59C2CC74B6B890FA7B90C910C7')
@@ -450,7 +459,7 @@ function Test-CTyunTrimManifest {
             }
         }
 
-        if ([string]$manifest.CoreFingerprint.ProfileVersion -ne 'ctyun-win11-26100-clipa-2.1.0.0') {
+        if ([string]$manifest.CoreFingerprint.ProfileVersion -ne $script:ApprovedCoreProfileVersion) {
             $errors.Add("Unsupported core fingerprint: $($manifest.CoreFingerprint.ProfileVersion)")
         }
         foreach ($fingerprintKey in @('Services', 'Drivers')) {
@@ -458,6 +467,8 @@ function Test-CTyunTrimManifest {
                 $errors.Add("Missing CoreFingerprint key: $fingerprintKey")
             }
         }
+        $pinnedCoreEntries = New-Object Collections.Generic.List[object]
+        $pinFields = @('ExpectedSha256', 'ExpectedSignerThumbprint', 'ExpectedSignerSubject', 'ExpectedSignerIssuer')
         if ($manifest.CoreFingerprint.ContainsKey('Services')) {
             foreach ($service in $manifest.CoreFingerprint.Services) {
                 if ([string]::IsNullOrWhiteSpace([string]$service.Name) -or [string]::IsNullOrWhiteSpace([string]$service.ExpectedImage)) {
@@ -466,11 +477,45 @@ function Test-CTyunTrimManifest {
                 elseif (-not (Test-CTPathWithinRoot -Path $service.ExpectedImage -Root $manifest.Roots.CTyun)) {
                     $errors.Add("Core service image is outside the immutable CTyun root: $($service.Name) / $($service.ExpectedImage)")
                 }
+                $trustMode = [string](Get-CTPropertyValue -InputObject $service -Name 'TrustMode')
+                if ($trustMode -eq 'PinnedHashAndSigner') {
+                    $pinnedCoreEntries.Add($service)
+                    if (-not [string]::Equals([string]$service.Name, [string]$script:ApprovedPinnedCoreIdentity.Name, [StringComparison]::Ordinal) -or
+                        -not [string]::Equals([string]$service.ExpectedImage, [string]$script:ApprovedPinnedCoreIdentity.ExpectedImage, [StringComparison]::OrdinalIgnoreCase)) {
+                        $errors.Add("PinnedHashAndSigner is approved only for the exact BalloonService image: $($service.Name) / $($service.ExpectedImage)")
+                    }
+                    if ([string]$service.ExpectedSha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
+                        -not [string]::Equals([string]$service.ExpectedSha256, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                        $errors.Add("Invalid or unapproved pinned SHA256 for core service: $($service.Name)")
+                    }
+                    if ([string]$service.ExpectedSignerThumbprint -notmatch '^[0-9A-Fa-f]{40}$' -or
+                        -not [string]::Equals([string]$service.ExpectedSignerThumbprint, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerThumbprint, [StringComparison]::OrdinalIgnoreCase)) {
+                        $errors.Add("Invalid or unapproved pinned signer thumbprint for core service: $($service.Name)")
+                    }
+                    if (-not [string]::Equals([string]$service.ExpectedSignerSubject, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerSubject, [StringComparison]::Ordinal) -or
+                        -not [string]::Equals([string]$service.ExpectedSignerIssuer, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerIssuer, [StringComparison]::Ordinal)) {
+                        $errors.Add("Invalid or unapproved pinned signer identity for core service: $($service.Name)")
+                    }
+                }
+                elseif ($trustMode -eq 'AuthenticodeValidAtBaseline') {
+                    foreach ($pinField in $pinFields) {
+                        if ($service.ContainsKey($pinField)) {
+                            $errors.Add("AuthenticodeValidAtBaseline core service contains a forbidden pin field: $($service.Name) / $pinField")
+                        }
+                    }
+                }
+                else {
+                    $errors.Add("Unsupported core service trust mode: $($service.Name) / $trustMode")
+                }
             }
             $fingerprintNames = @($manifest.CoreFingerprint.Services | ForEach-Object { [string]$_.Name } | Sort-Object)
             $preservedNames = @($manifest.Preserve.Services | ForEach-Object { [string]$_ } | Sort-Object)
             if (($fingerprintNames -join "`n") -cne ($preservedNames -join "`n")) {
                 $errors.Add('Core service fingerprint names do not exactly match Preserve.Services.')
+            }
+            $duplicateNames = @($manifest.CoreFingerprint.Services | ForEach-Object { [string]$_.Name } | Group-Object | Where-Object { $_.Count -gt 1 })
+            if ($duplicateNames.Count -gt 0) {
+                $errors.Add("Duplicate core service fingerprints: $($duplicateNames.Name -join ', ')")
             }
         }
         if ($manifest.CoreFingerprint.ContainsKey('Drivers')) {
@@ -485,12 +530,28 @@ function Test-CTyunTrimManifest {
                         $errors.Add("Core driver image is outside immutable approved roots: $($driver.Name) / $($driver.ExpectedImage)")
                     }
                 }
+                $trustMode = [string](Get-CTPropertyValue -InputObject $driver -Name 'TrustMode')
+                if ($trustMode -ne 'AuthenticodeValidAtBaseline') {
+                    $errors.Add("Core drivers must use AuthenticodeValidAtBaseline trust: $($driver.Name) / $trustMode")
+                }
+                foreach ($pinField in $pinFields) {
+                    if ($driver.ContainsKey($pinField)) {
+                        $errors.Add("Core driver contains a forbidden pin field: $($driver.Name) / $pinField")
+                    }
+                }
             }
             $fingerprintNames = @($manifest.CoreFingerprint.Drivers | ForEach-Object { [string]$_.Name } | Sort-Object)
             $preservedNames = @($manifest.Preserve.Drivers | ForEach-Object { [string]$_ } | Sort-Object)
             if (($fingerprintNames -join "`n") -cne ($preservedNames -join "`n")) {
                 $errors.Add('Core driver fingerprint names do not exactly match Preserve.Drivers.')
             }
+            $duplicateNames = @($manifest.CoreFingerprint.Drivers | ForEach-Object { [string]$_.Name } | Group-Object | Where-Object { $_.Count -gt 1 })
+            if ($duplicateNames.Count -gt 0) {
+                $errors.Add("Duplicate core driver fingerprints: $($duplicateNames.Name -join ', ')")
+            }
+        }
+        if ($pinnedCoreEntries.Count -ne 1) {
+            $errors.Add("Exactly one approved PinnedHashAndSigner core entry is required; found $($pinnedCoreEntries.Count).")
         }
 
         foreach ($service in $manifest.Services) {
@@ -718,6 +779,161 @@ function Get-CTWsusPolicySignature {
     }
 }
 
+function Get-CTStreamSha256 {
+    param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
+
+    $Stream.Position = 0
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($Stream)).Replace('-', '')
+    }
+    finally { $sha256.Dispose() }
+}
+
+function Get-CTCoreFileEvidence {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $fullPath = ConvertTo-CTFullPath -Path $Path
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "Core binary is missing: $fullPath"
+    }
+    if (Test-CTPathHasReparsePoint -Path $fullPath) {
+        throw "Core binary has a reparse-point ancestor: $fullPath"
+    }
+
+    $secureBefore = Test-CTSecureSourcePath -Path $fullPath
+    $stream = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $hashBefore = Get-CTStreamSha256 -Stream $stream
+        $signature = Get-AuthenticodeSignature -LiteralPath $fullPath -ErrorAction SilentlyContinue
+        $fileVersion = Get-CTNumericFileVersion -Path $fullPath
+        $hashAfter = Get-CTStreamSha256 -Stream $stream
+        $secureAfter = Test-CTSecureSourcePath -Path $fullPath
+        if ($hashBefore -ne $hashAfter) {
+            throw "Core binary changed while its identity was being inspected: $fullPath"
+        }
+
+        return [PSCustomObject]@{
+            FileSha256        = $hashBefore
+            FileVersion       = $fileVersion
+            SignatureStatus   = if ($null -ne $signature) { [string]$signature.Status } else { $null }
+            SignerThumbprint  = if (($null -ne $signature) -and ($null -ne $signature.SignerCertificate)) { [string]$signature.SignerCertificate.Thumbprint } else { $null }
+            SignerSubject     = if (($null -ne $signature) -and ($null -ne $signature.SignerCertificate)) { [string]$signature.SignerCertificate.Subject } else { $null }
+            SignerIssuer      = if (($null -ne $signature) -and ($null -ne $signature.SignerCertificate)) { [string]$signature.SignerCertificate.Issuer } else { $null }
+            SecureSource      = [bool]($secureBefore -and $secureAfter)
+        }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Test-CTCoreBinaryTrust {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Entry,
+        [Parameter(Mandatory = $true)][PSObject]$Evidence
+    )
+
+    $trustMode = [string](Get-CTPropertyValue -InputObject $Entry -Name 'TrustMode')
+    $fileSha256 = [string](Get-CTPropertyValue -InputObject $Evidence -Name 'FileSha256')
+    $signatureStatus = [string](Get-CTPropertyValue -InputObject $Evidence -Name 'SignatureStatus')
+    $signerThumbprint = [string](Get-CTPropertyValue -InputObject $Evidence -Name 'SignerThumbprint')
+    $signerSubject = [string](Get-CTPropertyValue -InputObject $Evidence -Name 'SignerSubject')
+    $signerIssuer = [string](Get-CTPropertyValue -InputObject $Evidence -Name 'SignerIssuer')
+    $secureValue = Get-CTPropertyValue -InputObject $Evidence -Name 'SecureSource'
+    $secureSource = ($secureValue -is [bool]) -and ($secureValue -eq $true)
+    $signerPresent = -not [string]::IsNullOrWhiteSpace($signerThumbprint) -and
+        -not [string]::IsNullOrWhiteSpace($signerSubject) -and
+        -not [string]::IsNullOrWhiteSpace($signerIssuer)
+
+    $hashMatches = $null
+    $signerMatches = $null
+    $signatureStatusAllowed = $false
+    $policyApproved = $false
+    $failureCode = 'UnsupportedTrustMode'
+
+    if (-not $secureSource) {
+        $failureCode = 'UnsafeSource'
+    }
+    elseif ($trustMode -eq 'AuthenticodeValidAtBaseline') {
+        $unexpectedPin = $false
+        foreach ($pinField in @('ExpectedSha256', 'ExpectedSignerThumbprint', 'ExpectedSignerSubject', 'ExpectedSignerIssuer')) {
+            if ($Entry.ContainsKey($pinField)) { $unexpectedPin = $true }
+        }
+        $policyApproved = -not $unexpectedPin
+        $signerMatches = $signerPresent
+        $signatureStatusAllowed = $signatureStatus -eq 'Valid'
+        if (-not $policyApproved) { $failureCode = 'UnexpectedPinFields' }
+        elseif (-not $signerPresent) { $failureCode = 'SignerMissing' }
+        elseif (-not $signatureStatusAllowed) { $failureCode = 'SignatureStatusRejected' }
+        else { $failureCode = 'None' }
+    }
+    elseif ($trustMode -eq 'PinnedHashAndSigner') {
+        $policyApproved = [string]::Equals([string]$Entry.Name, [string]$script:ApprovedPinnedCoreIdentity.Name, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$Entry.ExpectedImage, [string]$script:ApprovedPinnedCoreIdentity.ExpectedImage, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$Entry.ExpectedSha256, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSha256, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$Entry.ExpectedSignerThumbprint, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerThumbprint, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$Entry.ExpectedSignerSubject, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerSubject, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$Entry.ExpectedSignerIssuer, [string]$script:ApprovedPinnedCoreIdentity.ExpectedSignerIssuer, [StringComparison]::Ordinal)
+        $hashMatches = [string]::Equals($fileSha256, [string]$Entry.ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)
+        $signerMatches = $signerPresent -and
+            [string]::Equals($signerThumbprint, [string]$Entry.ExpectedSignerThumbprint, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals($signerSubject, [string]$Entry.ExpectedSignerSubject, [StringComparison]::Ordinal) -and
+            [string]::Equals($signerIssuer, [string]$Entry.ExpectedSignerIssuer, [StringComparison]::Ordinal)
+        $signatureStatusAllowed = $signatureStatus -in @('Valid', 'UnknownError')
+        if (-not $policyApproved) { $failureCode = 'UnapprovedPinnedIdentity' }
+        elseif (-not $hashMatches) { $failureCode = 'PinnedHashMismatch' }
+        elseif (-not $signerPresent) { $failureCode = 'SignerMissing' }
+        elseif (-not $signerMatches) { $failureCode = 'PinnedSignerMismatch' }
+        elseif (-not $signatureStatusAllowed) { $failureCode = 'SignatureStatusRejected' }
+        else { $failureCode = 'None' }
+    }
+
+    return [PSCustomObject]@{
+        TrustMode              = $trustMode
+        TrustSatisfied         = $failureCode -eq 'None'
+        PolicyApproved         = $policyApproved
+        SecureSource           = $secureSource
+        HashMatches            = $hashMatches
+        SignerPresent          = $signerPresent
+        SignerMatches          = $signerMatches
+        SignatureStatusAllowed = $signatureStatusAllowed
+        FailureCode            = $failureCode
+    }
+}
+
+function Test-CTCoreBaselineContinuity {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Entry,
+        [Parameter(Mandatory = $true)][PSObject]$BaselineEntry,
+        [Parameter(Mandatory = $true)][PSObject]$CurrentEvidence,
+        [switch]$AllowTrustDegradation
+    )
+
+    $baselineTrust = Test-CTCoreBinaryTrust -Entry $Entry -Evidence $BaselineEntry
+    $currentTrust = Test-CTCoreBinaryTrust -Entry $Entry -Evidence $CurrentEvidence
+    $currentContinuity = if ([string]$Entry.TrustMode -eq 'PinnedHashAndSigner') {
+        [bool]$currentTrust.TrustSatisfied
+    }
+    elseif ($AllowTrustDegradation) {
+        [bool]$currentTrust.SecureSource -and [bool]$currentTrust.SignerPresent -and
+            [string](Get-CTPropertyValue -InputObject $CurrentEvidence -Name 'SignatureStatus') -in @('Valid', 'UnknownError', 'NotTrusted')
+    }
+    else { [bool]$currentTrust.TrustSatisfied }
+    $matches = [bool]$baselineTrust.TrustSatisfied -and $currentContinuity -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'TrustMode'), [string]$Entry.TrustMode, [StringComparison]::Ordinal) -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'ExpectedImage'), [string]$Entry.ExpectedImage, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'FileSha256'), [string](Get-CTPropertyValue -InputObject $CurrentEvidence -Name 'FileSha256'), [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'SignerThumbprint'), [string](Get-CTPropertyValue -InputObject $CurrentEvidence -Name 'SignerThumbprint'), [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'SignerSubject'), [string](Get-CTPropertyValue -InputObject $CurrentEvidence -Name 'SignerSubject'), [StringComparison]::Ordinal) -and
+        [string]::Equals([string](Get-CTPropertyValue -InputObject $BaselineEntry -Name 'SignerIssuer'), [string](Get-CTPropertyValue -InputObject $CurrentEvidence -Name 'SignerIssuer'), [StringComparison]::Ordinal)
+
+    return [PSCustomObject]@{
+        Matches                = $matches
+        BaselineTrustSatisfied = [bool]$baselineTrust.TrustSatisfied
+        CurrentTrustSatisfied  = [bool]$currentTrust.TrustSatisfied
+        CurrentContinuity      = $currentContinuity
+    }
+}
+
 function Get-CTyunTrimInventory {
     [CmdletBinding()]
     param(
@@ -735,10 +951,10 @@ function Get-CTyunTrimInventory {
     $coreServices = foreach ($entry in $manifest.CoreFingerprint.Services) {
         $service = Get-CTServiceByName -Name $entry.Name
         $actualImage = if ($null -ne $service) { Get-CTImageExecutable -PathName ([string]$service.PathName) } else { $null }
-        $signature = if (-not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)) {
-            Get-AuthenticodeSignature -LiteralPath $actualImage -ErrorAction SilentlyContinue
-        }
-        else { $null }
+        $imageExists = -not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)
+        $hasReparsePoint = $imageExists -and (Test-CTPathHasReparsePoint -Path $actualImage)
+        $evidence = if ($imageExists -and -not $hasReparsePoint) { Get-CTCoreFileEvidence -Path $actualImage } else { $null }
+        $trust = if ($null -ne $evidence) { Test-CTCoreBinaryTrust -Entry $entry -Evidence $evidence } else { $null }
         [PSCustomObject]@{
             Name                = $entry.Name
             Present             = ($null -ne $service)
@@ -747,13 +963,21 @@ function Get-CTyunTrimInventory {
             PathName            = if ($null -ne $service) { $service.PathName } else { $null }
             ExpectedImage       = $entry.ExpectedImage
             PathExpected        = if ($null -ne $service) { Test-CTExpectedService -Service $service -ExpectedImage $entry.ExpectedImage } else { $false }
-            ImageExists         = if (-not [string]::IsNullOrWhiteSpace($actualImage)) { Test-Path -LiteralPath $actualImage -PathType Leaf } else { $false }
-            HasReparsePoint     = if (-not [string]::IsNullOrWhiteSpace($actualImage)) { Test-CTPathHasReparsePoint -Path $actualImage } else { $false }
-            FileSha256          = if (-not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)) { (Get-FileHash -LiteralPath $actualImage -Algorithm SHA256).Hash } else { $null }
-            SignatureStatus     = if ($null -ne $signature) { [string]$signature.Status } else { $null }
-            SignerSubject       = if (($null -ne $signature) -and ($null -ne $signature.SignerCertificate)) { [string]$signature.SignerCertificate.Subject } else { $null }
+            ImageExists         = $imageExists
+            HasReparsePoint     = $hasReparsePoint
+            FileSha256          = if ($null -ne $evidence) { [string]$evidence.FileSha256 } else { $null }
+            SignatureStatus     = if ($null -ne $evidence) { [string]$evidence.SignatureStatus } else { $null }
+            SignerThumbprint    = if ($null -ne $evidence) { [string]$evidence.SignerThumbprint } else { $null }
+            SignerSubject       = if ($null -ne $evidence) { [string]$evidence.SignerSubject } else { $null }
+            SignerIssuer        = if ($null -ne $evidence) { [string]$evidence.SignerIssuer } else { $null }
+            TrustMode           = [string]$entry.TrustMode
+            SecureSource        = if ($null -ne $trust) { [bool]$trust.SecureSource } else { $false }
+            HashMatches         = if ($null -ne $trust) { $trust.HashMatches } else { $null }
+            SignerPresent       = if ($null -ne $trust) { [bool]$trust.SignerPresent } else { $false }
+            SignerMatches       = if ($null -ne $trust) { $trust.SignerMatches } else { $null }
+            TrustSatisfied      = if ($null -ne $trust) { [bool]$trust.TrustSatisfied } else { $false }
             ExpectedFileVersion = if ($entry.ContainsKey('ExpectedFileVersion')) { [string]$entry.ExpectedFileVersion } else { $null }
-            FileVersion         = if (-not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)) { Get-CTNumericFileVersion -Path $actualImage } else { $null }
+            FileVersion         = if ($null -ne $evidence) { [string]$evidence.FileVersion } else { $null }
         }
     }
 
@@ -772,10 +996,10 @@ function Get-CTyunTrimInventory {
     $coreDrivers = foreach ($entry in $manifest.CoreFingerprint.Drivers) {
         $driver = Get-CTServiceByName -Name $entry.Name -Driver
         $actualImage = if ($null -ne $driver) { Get-CTImageExecutable -PathName ([string]$driver.PathName) } else { $null }
-        $signature = if (-not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)) {
-            Get-AuthenticodeSignature -LiteralPath $actualImage -ErrorAction SilentlyContinue
-        }
-        else { $null }
+        $imageExists = -not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)
+        $hasReparsePoint = $imageExists -and (Test-CTPathHasReparsePoint -Path $actualImage)
+        $evidence = if ($imageExists -and -not $hasReparsePoint) { Get-CTCoreFileEvidence -Path $actualImage } else { $null }
+        $trust = if ($null -ne $evidence) { Test-CTCoreBinaryTrust -Entry $entry -Evidence $evidence } else { $null }
         [PSCustomObject]@{
             Name            = $entry.Name
             Present         = ($null -ne $driver)
@@ -784,11 +1008,19 @@ function Get-CTyunTrimInventory {
             PathName        = if ($null -ne $driver) { $driver.PathName } else { $null }
             ExpectedImage   = $entry.ExpectedImage
             PathExpected    = if ($null -ne $driver) { Test-CTExpectedService -Service $driver -ExpectedImage $entry.ExpectedImage } else { $false }
-            ImageExists     = if (-not [string]::IsNullOrWhiteSpace($actualImage)) { Test-Path -LiteralPath $actualImage -PathType Leaf } else { $false }
-            HasReparsePoint = if (-not [string]::IsNullOrWhiteSpace($actualImage)) { Test-CTPathHasReparsePoint -Path $actualImage } else { $false }
-            FileSha256      = if (-not [string]::IsNullOrWhiteSpace($actualImage) -and (Test-Path -LiteralPath $actualImage -PathType Leaf)) { (Get-FileHash -LiteralPath $actualImage -Algorithm SHA256).Hash } else { $null }
-            SignatureStatus = if ($null -ne $signature) { [string]$signature.Status } else { $null }
-            SignerSubject   = if (($null -ne $signature) -and ($null -ne $signature.SignerCertificate)) { [string]$signature.SignerCertificate.Subject } else { $null }
+            ImageExists     = $imageExists
+            HasReparsePoint = $hasReparsePoint
+            FileSha256      = if ($null -ne $evidence) { [string]$evidence.FileSha256 } else { $null }
+            SignatureStatus = if ($null -ne $evidence) { [string]$evidence.SignatureStatus } else { $null }
+            SignerThumbprint = if ($null -ne $evidence) { [string]$evidence.SignerThumbprint } else { $null }
+            SignerSubject   = if ($null -ne $evidence) { [string]$evidence.SignerSubject } else { $null }
+            SignerIssuer    = if ($null -ne $evidence) { [string]$evidence.SignerIssuer } else { $null }
+            TrustMode       = [string]$entry.TrustMode
+            SecureSource    = if ($null -ne $trust) { [bool]$trust.SecureSource } else { $false }
+            HashMatches     = if ($null -ne $trust) { $trust.HashMatches } else { $null }
+            SignerPresent   = if ($null -ne $trust) { [bool]$trust.SignerPresent } else { $false }
+            SignerMatches   = if ($null -ne $trust) { $trust.SignerMatches } else { $null }
+            TrustSatisfied  = if ($null -ne $trust) { [bool]$trust.TrustSatisfied } else { $false }
         }
     }
 
@@ -1085,6 +1317,8 @@ function Get-CTDiagnosticCode {
         '(?i)reparse|junction|symbolic'              { return 'UnsafeReparsePoint' }
         '(?i)backup root|quarantine'                { return 'BackupOrQuarantineFailure' }
         '(?i)Windows PowerShell|administrator|64-bit' { return 'RuntimeRequirementFailed' }
+        '(?i)explicit -Force switch'                { return 'ForceRequired' }
+        '(?i)DiagnosticCannotCombineWithRestart'    { return 'DiagnosticRestartConflict' }
         '(?i)declined'                              { return 'OperationDeclined' }
         '(?i)preflight'                             { return 'PreflightFailed' }
         '(?i)reboot'                                { return 'RebootRequired' }
@@ -1218,6 +1452,12 @@ function Get-CTDiagnosticInventoryView {
             ImageExists      = [bool]$service.ImageExists
             HasReparsePoint  = [bool]$service.HasReparsePoint
             SignatureStatus  = Get-CTDiagnosticEnumValue -Value ([string]$service.SignatureStatus) -Allowed @('Valid', 'UnknownError', 'NotSigned', 'HashMismatch', 'NotTrusted', 'NotSupported', 'Incompatible')
+            TrustMode        = Get-CTDiagnosticEnumValue -Value ([string]$service.TrustMode) -Allowed @('AuthenticodeValidAtBaseline', 'PinnedHashAndSigner')
+            SecureSource     = [bool]$service.SecureSource
+            HashMatches      = if ([string]$service.TrustMode -eq 'PinnedHashAndSigner') { [bool]$service.HashMatches } else { $null }
+            SignerPresent    = [bool]$service.SignerPresent
+            SignerMatches    = if ([string]$service.TrustMode -eq 'PinnedHashAndSigner') { [bool]$service.SignerMatches } else { $null }
+            TrustSatisfied   = [bool]$service.TrustSatisfied
             VersionMatches   = [string]::IsNullOrWhiteSpace([string]$service.ExpectedFileVersion) -or [string]$service.FileVersion -eq [string]$service.ExpectedFileVersion
         }
     }
@@ -1231,6 +1471,10 @@ function Get-CTDiagnosticInventoryView {
             ImageExists     = [bool]$driver.ImageExists
             HasReparsePoint = [bool]$driver.HasReparsePoint
             SignatureStatus = Get-CTDiagnosticEnumValue -Value ([string]$driver.SignatureStatus) -Allowed @('Valid', 'UnknownError', 'NotSigned', 'HashMismatch', 'NotTrusted', 'NotSupported', 'Incompatible')
+            TrustMode       = Get-CTDiagnosticEnumValue -Value ([string]$driver.TrustMode) -Allowed @('AuthenticodeValidAtBaseline', 'PinnedHashAndSigner')
+            SecureSource    = [bool]$driver.SecureSource
+            SignerPresent   = [bool]$driver.SignerPresent
+            TrustSatisfied  = [bool]$driver.TrustSatisfied
         }
     }
     $removalServices = foreach ($service in @($Inventory.RemovalServices)) {
@@ -1661,7 +1905,7 @@ function New-CTyunTrimDiagnosticBundle {
             Process64Bit       = [bool][Environment]::Is64BitProcess
             OperatingSystemVersion = if ([string]$os.Version -match '^[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?$') { [string]$os.Version } else { 'Unknown' }
             OperatingSystemBuild   = [int]$os.Build
-            OperatingSystemArchitecture = Get-CTDiagnosticEnumValue -Value ([string]$os.Architecture) -Allowed @('64-bit', '32-bit')
+            OperatingSystemArchitecture = if ([Environment]::Is64BitOperatingSystem) { '64-bit' } else { '32-bit' }
             SupportedBuild     = if ($validation.Valid) { @($manifest.SupportedBuilds) -contains [int]$os.Build } else { $false }
         }
         $readme = @'
@@ -2453,8 +2697,6 @@ function Test-CTCoreHealth {
 
         [switch]$RequireRunning,
 
-        [switch]$RequireTrustedSignature,
-
         [PSObject]$Context
     )
 
@@ -2464,48 +2706,83 @@ function Test-CTCoreHealth {
         try { $baselineInventory = Get-CTBaselineCoreInventory -Context $Context }
         catch { $failures.Add("Core integrity baseline failed validation: $($_.Exception.Message)") }
     }
-    foreach ($entry in $Manifest.CoreFingerprint.Services) {
-        $service = Get-CTServiceByName -Name $entry.Name
-        if ($null -eq $service) {
-            $failures.Add("Protected service is missing: $($entry.Name)")
-            continue
-        }
+    $contextOperations = if ($null -ne $Context) { @(Get-CTPropertyValue -InputObject $Context -Name 'Operations') } else { @() }
+    $knownCertificateTargets = @($Manifest.KnownCertificates | ForEach-Object { [string]$_.Thumbprint })
+    $allowTrustDegradation = @($contextOperations | Where-Object {
+        [string](Get-CTPropertyValue -InputObject $_ -Name 'Type') -eq 'Certificate' -and
+        [string](Get-CTPropertyValue -InputObject $_ -Name 'Status') -eq 'Completed' -and
+        $knownCertificateTargets -contains [string](Get-CTPropertyValue -InputObject $_ -Name 'Target')
+    }).Count -gt 0
 
-        if ($RequireRunning -and $service.State -ne 'Running') {
-            $failures.Add("Protected service is not running: $($entry.Name) ($($service.State))")
-        }
-        if (-not (Test-CTExpectedService -Service $service -ExpectedImage $entry.ExpectedImage)) {
-            $failures.Add("Protected service ImagePath mismatch: $($entry.Name) / $($service.PathName)")
-            continue
-        }
+    foreach ($kind in @('Service', 'Driver')) {
+        $entries = if ($kind -eq 'Service') { @($Manifest.CoreFingerprint.Services) } else { @($Manifest.CoreFingerprint.Drivers) }
+        foreach ($entry in $entries) {
+            $component = if ($kind -eq 'Service') {
+                Get-CTServiceByName -Name $entry.Name
+            }
+            else {
+                Get-CTServiceByName -Name $entry.Name -Driver
+            }
+            $kindLower = $kind.ToLowerInvariant()
+            if ($null -eq $component) {
+                $failures.Add("Protected $kindLower is missing: $($entry.Name)")
+                continue
+            }
 
-        $image = Get-CTImageExecutable -PathName ([string]$service.PathName)
-        if ([string]::IsNullOrWhiteSpace($image) -or -not (Test-Path -LiteralPath $image -PathType Leaf)) {
-            $failures.Add("Protected service image is missing: $($entry.Name) / $($entry.ExpectedImage)")
-            continue
-        }
-        if (Test-CTPathHasReparsePoint -Path $image) {
-            $failures.Add("Protected service image has a reparse-point ancestor: $($entry.Name) / $image")
-            continue
-        }
-        $signature = Get-AuthenticodeSignature -LiteralPath $image -ErrorAction SilentlyContinue
-        $currentHash = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash
-        $baselineEntry = if ($null -ne $baselineInventory) { @($baselineInventory.CoreServices | Where-Object { $_.Name -eq $entry.Name }) | Select-Object -First 1 } else { $null }
-        $baselineMatch = ($null -ne $baselineEntry) -and [string]$baselineEntry.SignatureStatus -eq 'Valid' -and
-            [string]$baselineEntry.FileSha256 -eq $currentHash -and [string]$baselineEntry.ExpectedImage -ieq [string]$entry.ExpectedImage
-        if ($null -ne $Context -and -not $baselineMatch) {
-            $failures.Add("Protected service image differs from the trusted pre-cleanup baseline: $($entry.Name) / $image")
-        }
-        elseif ($RequireTrustedSignature -and ($null -eq $signature -or $signature.Status -ne 'Valid') -and $null -eq $Context) {
-            $failures.Add("Protected service image signature is not trusted before cleanup: $($entry.Name) / $image")
-        }
-        elseif ($null -eq $Context -and ($null -eq $signature -or $null -eq $signature.SignerCertificate -or $signature.Status -in @('HashMismatch', 'NotSigned'))) {
-            $failures.Add("Protected service image is unsigned or its signature hash failed: $($entry.Name) / $image")
-        }
-        if ($entry.ContainsKey('ExpectedFileVersion')) {
-            $actualVersion = Get-CTNumericFileVersion -Path $image
-            if ($actualVersion -ne [string]$entry.ExpectedFileVersion) {
-                $failures.Add("Protected service version mismatch: $($entry.Name) / expected $($entry.ExpectedFileVersion), actual $actualVersion")
+            if ($RequireRunning -and $component.State -ne 'Running') {
+                $failures.Add("Protected $kindLower is not running: $($entry.Name) ($($component.State))")
+            }
+            if (-not (Test-CTExpectedService -Service $component -ExpectedImage $entry.ExpectedImage)) {
+                $failures.Add("Protected $kindLower ImagePath mismatch: $($entry.Name) / $($component.PathName)")
+                continue
+            }
+
+            $image = Get-CTImageExecutable -PathName ([string]$component.PathName)
+            if ([string]::IsNullOrWhiteSpace($image) -or -not (Test-Path -LiteralPath $image -PathType Leaf)) {
+                $failures.Add("Protected $kindLower image is missing: $($entry.Name) / $($entry.ExpectedImage)")
+                continue
+            }
+            if (Test-CTPathHasReparsePoint -Path $image) {
+                $failures.Add("Protected $kindLower image has a reparse-point ancestor: $($entry.Name) / $image")
+                continue
+            }
+
+            try { $evidence = Get-CTCoreFileEvidence -Path $image }
+            catch {
+                $failures.Add("Protected $kindLower image identity could not be inspected safely: $($entry.Name) / $image / $($_.Exception.Message)")
+                continue
+            }
+            $currentTrust = Test-CTCoreBinaryTrust -Entry $entry -Evidence $evidence
+
+            if ($null -ne $Context) {
+                $baselineEntries = @(if ($null -eq $baselineInventory) {
+                    @()
+                }
+                elseif ($kind -eq 'Service') {
+                    @($baselineInventory.CoreServices | Where-Object { $_.Name -eq $entry.Name })
+                }
+                else {
+                    @($baselineInventory.CoreDrivers | Where-Object { $_.Name -eq $entry.Name })
+                })
+                $baselineMatch = $false
+                if ($baselineEntries.Count -eq 1) {
+                    $baselineEntry = $baselineEntries[0]
+                    $baselineMatch = [bool](Test-CTCoreBaselineContinuity -Entry $entry -BaselineEntry $baselineEntry -CurrentEvidence $evidence -AllowTrustDegradation:$allowTrustDegradation).Matches
+                }
+                if (-not $baselineMatch) {
+                    $failures.Add("Protected $kindLower image differs from the trusted pre-cleanup baseline: $($entry.Name) / $image")
+                }
+            }
+            else {
+                if (-not $currentTrust.TrustSatisfied) {
+                    $failures.Add("Protected $kindLower image failed its $($entry.TrustMode) trust policy: $($entry.Name) / $image / $($currentTrust.FailureCode)")
+                }
+            }
+
+            if ($kind -eq 'Service' -and $entry.ContainsKey('ExpectedFileVersion')) {
+                if ([string]$evidence.FileVersion -ne [string]$entry.ExpectedFileVersion) {
+                    $failures.Add("Protected service version mismatch: $($entry.Name) / expected $($entry.ExpectedFileVersion), actual $($evidence.FileVersion)")
+                }
             }
         }
     }
@@ -2514,42 +2791,6 @@ function Test-CTCoreHealth {
     foreach ($path in $requiredPaths) {
         if (-not (Test-Path -LiteralPath $path)) {
             $failures.Add("Protected path is missing: $path")
-        }
-    }
-
-    foreach ($entry in $Manifest.CoreFingerprint.Drivers) {
-        $driver = Get-CTServiceByName -Name $entry.Name -Driver
-        if ($null -eq $driver) {
-            $failures.Add("Protected driver is missing: $($entry.Name)")
-            continue
-        }
-        if (-not (Test-CTExpectedService -Service $driver -ExpectedImage $entry.ExpectedImage)) {
-            $failures.Add("Protected driver ImagePath mismatch: $($entry.Name) / $($driver.PathName)")
-            continue
-        }
-
-        $image = Get-CTImageExecutable -PathName ([string]$driver.PathName)
-        if ([string]::IsNullOrWhiteSpace($image) -or -not (Test-Path -LiteralPath $image -PathType Leaf)) {
-            $failures.Add("Protected driver image is missing: $($entry.Name) / $($entry.ExpectedImage)")
-            continue
-        }
-        if (Test-CTPathHasReparsePoint -Path $image) {
-            $failures.Add("Protected driver image has a reparse-point ancestor: $($entry.Name) / $image")
-            continue
-        }
-        $signature = Get-AuthenticodeSignature -LiteralPath $image -ErrorAction SilentlyContinue
-        $currentHash = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash
-        $baselineEntry = if ($null -ne $baselineInventory) { @($baselineInventory.CoreDrivers | Where-Object { $_.Name -eq $entry.Name }) | Select-Object -First 1 } else { $null }
-        $baselineMatch = ($null -ne $baselineEntry) -and [string]$baselineEntry.SignatureStatus -eq 'Valid' -and
-            [string]$baselineEntry.FileSha256 -eq $currentHash -and [string]$baselineEntry.ExpectedImage -ieq [string]$entry.ExpectedImage
-        if ($null -ne $Context -and -not $baselineMatch) {
-            $failures.Add("Protected driver image differs from the trusted pre-cleanup baseline: $($entry.Name) / $image")
-        }
-        elseif ($RequireTrustedSignature -and ($null -eq $signature -or $signature.Status -ne 'Valid') -and $null -eq $Context) {
-            $failures.Add("Protected driver image signature is not trusted before cleanup: $($entry.Name) / $image")
-        }
-        elseif ($null -eq $Context -and ($null -eq $signature -or $null -eq $signature.SignerCertificate -or $signature.Status -in @('HashMismatch', 'NotSigned'))) {
-            $failures.Add("Protected driver image is unsigned or its signature hash failed: $($entry.Name) / $image")
         }
     }
 
@@ -3947,7 +4188,8 @@ function Get-CTVerification {
         if ($service.Present -and $service.StartMode -ne 'Auto') {
             $warnings.Add("Core service is not Automatic: $($service.Name) ($($service.StartMode))")
         }
-        if ($service.Present -and -not [string]::IsNullOrWhiteSpace([string]$service.SignerSubject) -and $service.SignatureStatus -ne 'Valid') {
+        $expectedPinnedTrust = [string]$service.TrustMode -eq 'PinnedHashAndSigner' -and [bool]$service.TrustSatisfied
+        if ($service.Present -and -not $expectedPinnedTrust -and -not [string]::IsNullOrWhiteSpace([string]$service.SignerSubject) -and $service.SignatureStatus -ne 'Valid') {
             $warnings.Add("Core service retains a cryptographic signer but is no longer trusted after certificate cleanup: $($service.Name) ($($service.SignatureStatus))")
         }
     }
@@ -4132,7 +4374,7 @@ function Test-CTApplyPreflight {
     $warnings = New-Object Collections.Generic.List[string]
     try { $taskSnapshot = @(Get-ScheduledTask -ErrorAction Stop) }
     catch { $taskSnapshot = @(); $errors.Add("Scheduled Task inventory failed: $($_.Exception.Message)") }
-    $health = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -RequireTrustedSignature -Context $Context
+    $health = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -Context $Context
     foreach ($failure in $health.Failures) { $errors.Add($failure) }
 
     $backupRootFull = ConvertTo-CTFullPath -Path $BackupRoot
@@ -4434,6 +4676,10 @@ function Invoke-CTApply {
         if (@($context.Operations | Where-Object { $_.Type -eq 'Baseline' }).Count -eq 0) {
             Export-CTBaseline -Context $context -Manifest $Manifest
         }
+        $baselineHealth = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -Context $context
+        if (-not $baselineHealth.Healthy) {
+            throw "Core baseline continuity failed before Apply changes: $($baselineHealth.Failures -join '; ')"
+        }
         [void](Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest)
         foreach ($warning in $preflight.Warnings) {
             Add-CTWarning -Context $context -Message $warning
@@ -4569,6 +4815,10 @@ function Invoke-CTPrepare {
     $context = New-CTRunContext -BackupRoot $BackupRoot -ManifestPath $ManifestPath
     try {
         Export-CTBaseline -Context $context -Manifest $Manifest
+        $baselineHealth = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -Context $context
+        if (-not $baselineHealth.Healthy) {
+            throw "Core baseline continuity failed before Prepare changes: $($baselineHealth.Failures -join '; ')"
+        }
         [void](Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest)
         foreach ($warning in $preflight.Warnings) {
             Add-CTWarning -Context $context -Message $warning

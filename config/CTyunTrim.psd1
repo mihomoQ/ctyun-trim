@@ -17,19 +17,27 @@
     }
 
     CoreFingerprint = @{
-        ProfileVersion = 'ctyun-win11-26100-clipa-2.1.0.0'
+        ProfileVersion = 'ctyun-win11-26100-26200-clipa-2.1.0.0-balloon-1b821f55'
 
         Services = @(
-            @{ Name = 'BalloonService';     ExpectedImage = 'C:\Program Files (x86)\ctyun\clink\drivers\Balloon\blnsvr.exe' },
-            @{ Name = 'clink_service';      ExpectedImage = 'C:\Program Files (x86)\ctyun\clink\64\clink_service.exe' },
-            @{ Name = 'clipa';              ExpectedImage = 'C:\Program Files (x86)\ctyun\clipa\clipa.win.exe'; ExpectedFileVersion = '2.1.0.0' },
-            @{ Name = 'cloudshare_service'; ExpectedImage = 'C:\Program Files (x86)\ctyun\cloudshare\cloudshare_service.exe' }
+            @{
+                Name                     = 'BalloonService'
+                ExpectedImage            = 'C:\Program Files (x86)\ctyun\clink\drivers\Balloon\blnsvr.exe'
+                TrustMode                = 'PinnedHashAndSigner'
+                ExpectedSha256           = '1B821F556FFC8F998196CDBFEE6D84846600D39EB1B584D182BFCC5AB6DFCD4E'
+                ExpectedSignerThumbprint = '301C73596BAC4FE8EE33487687BD75FCC307FFC6'
+                ExpectedSignerSubject    = 'CN=Red Hat Inc., OU=Dev, O=virtio-win'
+                ExpectedSignerIssuer     = 'CN=Red Hat Inc., OU=Dev, O=virtio-win'
+            },
+            @{ Name = 'clink_service';      ExpectedImage = 'C:\Program Files (x86)\ctyun\clink\64\clink_service.exe'; TrustMode = 'AuthenticodeValidAtBaseline' },
+            @{ Name = 'clipa';              ExpectedImage = 'C:\Program Files (x86)\ctyun\clipa\clipa.win.exe'; TrustMode = 'AuthenticodeValidAtBaseline'; ExpectedFileVersion = '2.1.0.0' },
+            @{ Name = 'cloudshare_service'; ExpectedImage = 'C:\Program Files (x86)\ctyun\cloudshare\cloudshare_service.exe'; TrustMode = 'AuthenticodeValidAtBaseline' }
         )
 
         Drivers = @(
-            @{ Name = 'CLINKAC';          ExpectedImage = 'C:\Windows\System32\drivers\CLINKAC.sys' },
-            @{ Name = 'ClinkMouseFilter'; ExpectedImage = 'C:\Windows\System32\drivers\ClinkMouseFilter.sys' },
-            @{ Name = 'WinDivertScanner'; ExpectedImage = 'C:\Program Files (x86)\ctyun\clink\res\WinDivertProxy-Port\WinDivert64.sys' }
+            @{ Name = 'CLINKAC';          ExpectedImage = 'C:\Windows\System32\drivers\CLINKAC.sys'; TrustMode = 'AuthenticodeValidAtBaseline' },
+            @{ Name = 'ClinkMouseFilter'; ExpectedImage = 'C:\Windows\System32\drivers\ClinkMouseFilter.sys'; TrustMode = 'AuthenticodeValidAtBaseline' },
+            @{ Name = 'WinDivertScanner'; ExpectedImage = 'C:\Program Files (x86)\ctyun\clink\res\WinDivertProxy-Port\WinDivert64.sys'; TrustMode = 'AuthenticodeValidAtBaseline' }
         )
     }
 

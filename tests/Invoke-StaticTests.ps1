@@ -77,7 +77,7 @@ Assert-CT -Condition ($sourceText -notmatch '(?i)Win32_Product') -Message 'Win32
 Assert-CT -Condition ($sourceText -notmatch '(?i)Invoke-Expression') -Message 'Invoke-Expression is forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Start-Transcript') -Message 'Unstructured PowerShell transcripts are forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Remove-Item.+System32\\GroupPolicy') -Message 'Deleting the complete GroupPolicy directory is forbidden.'
-Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.1') -Message 'ModuleVersion is not 0.1.1.'
+Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.2') -Message 'ModuleVersion is not 0.1.2.'
 Assert-CT -Condition ([string]$moduleManifest.PrivateData.PSData.Prerelease -eq 'Diagnostic') -Message 'Module prerelease label is not Diagnostic.'
 Assert-CT -Condition (@($moduleManifest.FunctionsToExport) -contains 'New-CTyunTrimDiagnosticBundle') -Message 'Diagnostic bundle exporter is not declared in the module manifest.'
 $diagnosticResultSafety = & (Get-Module CTyunTrim) {
@@ -115,6 +115,19 @@ Assert-CT -Condition (($coreServiceNames -join "`n") -ceq ($preservedServiceName
 Assert-CT -Condition (($coreDriverNames -join "`n") -ceq ($preservedDriverNames -join "`n")) -Message 'Core driver fingerprint differs from the preserved driver set.'
 $clipaFingerprint = @($manifest.CoreFingerprint.Services | Where-Object { $_.Name -eq 'clipa' }) | Select-Object -First 1
 Assert-CT -Condition ([string]$clipaFingerprint.ExpectedFileVersion -eq '2.1.0.0') -Message 'The clipa 2.1.0.0 reference fingerprint is missing.'
+$pinnedCoreEntries = @($manifest.CoreFingerprint.Services + $manifest.CoreFingerprint.Drivers | Where-Object { $_.TrustMode -eq 'PinnedHashAndSigner' })
+Assert-CT -Condition ($pinnedCoreEntries.Count -eq 1) -Message 'The manifest must contain exactly one pinned core identity.'
+$balloonFingerprint = @($pinnedCoreEntries | Where-Object { $_.Name -eq 'BalloonService' }) | Select-Object -First 1
+Assert-CT -Condition ($null -ne $balloonFingerprint) -Message 'The pinned core identity is not BalloonService.'
+if ($null -ne $balloonFingerprint) {
+    Assert-CT -Condition ([string]$balloonFingerprint.ExpectedImage -eq 'C:\Program Files (x86)\ctyun\clink\drivers\Balloon\blnsvr.exe') -Message 'The BalloonService pinned path changed.'
+    Assert-CT -Condition ([string]$balloonFingerprint.ExpectedSha256 -eq '1B821F556FFC8F998196CDBFEE6D84846600D39EB1B584D182BFCC5AB6DFCD4E') -Message 'The BalloonService pinned SHA256 changed.'
+    Assert-CT -Condition ([string]$balloonFingerprint.ExpectedSignerThumbprint -eq '301C73596BAC4FE8EE33487687BD75FCC307FFC6') -Message 'The BalloonService signer thumbprint changed.'
+    Assert-CT -Condition ([string]$balloonFingerprint.ExpectedSignerSubject -eq 'CN=Red Hat Inc., OU=Dev, O=virtio-win') -Message 'The BalloonService signer subject changed.'
+    Assert-CT -Condition ([string]$balloonFingerprint.ExpectedSignerIssuer -eq [string]$balloonFingerprint.ExpectedSignerSubject) -Message 'The BalloonService signer is no longer the observed self-issued identity.'
+}
+$nonPinnedCoreEntries = @($manifest.CoreFingerprint.Services + $manifest.CoreFingerprint.Drivers | Where-Object { $_.Name -ne 'BalloonService' })
+Assert-CT -Condition (@($nonPinnedCoreEntries | Where-Object { $_.TrustMode -ne 'AuthenticodeValidAtBaseline' }).Count -eq 0) -Message 'A non-Balloon core entry no longer requires AuthenticodeValidAtBaseline.'
 
 $module = Get-Module CTyunTrim
 $programFilesAclSafe = & $module { Test-CTSecureSourcePath -Path 'C:\Program Files' }
@@ -276,7 +289,7 @@ try {
     $buildThrew = $false
     try { & (Join-Path $root 'build\Build-Release.ps1') -Version '..\..\config' | Out-Null } catch { $buildThrew = $true }
     Assert-CT -Condition $buildThrew -Message 'Release builder accepted a path-traversal version.'
-    foreach ($invalidVersion in @('0.1.1-Diagnostic.', '0.1.1--Diagnostic', '0.1.1-Diagnostic:')) {
+    foreach ($invalidVersion in @('0.1.2-Diagnostic.', '0.1.2--Diagnostic', '0.1.2-Diagnostic:')) {
         $invalidVersionThrew = $false
         try { & (Join-Path $root 'build\Build-Release.ps1') -Version $invalidVersion | Out-Null } catch { $invalidVersionThrew = $true }
         Assert-CT -Condition $invalidVersionThrew -Message "Release builder accepted an unsafe prerelease version: $invalidVersion"
