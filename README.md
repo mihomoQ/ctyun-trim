@@ -5,7 +5,7 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.3-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
+当前状态：**Experimental / 0.1.4-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
 
 ## 项目目标
 
@@ -80,6 +80,8 @@ CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 Re
 
 在 ReviOS 之前运行 Prepare 还有一个安全作用：它会在 Cloudbase 服务仍可核验时存档账户/Profile SID 与精确服务映像证据。若先由其他工具删掉服务，再直接运行 CTyunTrim，脚本不会仅凭用户名猜测并删除账户。
 
+参考镜像可能由精确的 `TaskAgentDetect.exe` 以 `cloudbase-init` 身份挂载 Profile。Prepare 只在账户/Profile SID、安全本地 RID、服务或任务 Principal 的 SID 归属锚、进程 Owner SID、Session 0、精确任务映像路径、签名、ACL 和引用全部匹配时接受这一状态；它在变更边界复验后先建立 IFEO guard，再停止该进程并移除任务，但不会删除账户、Profile 或强制卸载 hive。Apply 仍要求 Profile 与 hive 已自然卸载，`Special=true` 或同 SID 的异常 Profile 路径在所有阶段均为硬阻断。
+
 如果 Apply 返回 `PendingReboot`，重启后必须使用同一个 RunId 续跑，避免把一次变更拆成多个无法统一恢复的备份：
 
 ```powershell
@@ -123,7 +125,7 @@ Diagnostic 导出要求 64 位管理员 Windows PowerShell 5.1，并固定写入
 
 ### 恢复
 
-Apply 会返回 `RunId` 和备份目录。0.1.3 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
+Apply 会返回 `RunId` 和备份目录。0.1.4 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
 
 ## 与 ReviOS 配合
 

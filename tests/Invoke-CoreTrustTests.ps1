@@ -283,13 +283,27 @@ $preflightRegression = & $module {
 
     $script:PreflightFixtureGuardMode = 'Absent'
     $script:PreflightFixtureGuardImage = [string]$FixtureManifest.ExecutionGuards[0]
+    $script:PreflightFixtureUsers = @()
+    $script:PreflightFixtureProfiles = @()
+    $script:PreflightFixtureCloudbaseService = $false
+    $script:PreflightFixtureHiveMounted = $false
+    $script:PreflightFixtureOwnedProcesses = @()
+    $script:PreflightFixtureReferences = @()
+    $script:PreflightFixtureIdentityAnchors = @()
     function Test-CTCoreHealth {
         param([hashtable]$Manifest, [switch]$RequireRunning, [PSObject]$Context)
         [PSCustomObject]@{ Healthy = $true; Failures = @() }
     }
     function Test-CTPathHasReparsePoint { param([string]$Path) return $false }
     function Test-CTSecureSourcePath { param([string]$Path) return $true }
-    function Get-CTServiceByName { param([string]$Name, [switch]$Driver) return $null }
+    function Get-CTServiceByName {
+        param([string]$Name, [switch]$Driver)
+        if (-not $Driver -and $script:PreflightFixtureCloudbaseService -and $Name -eq 'cloudbase-init') {
+            $entry = @($script:PreflightFixtureManifest.Services | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
+            return [PSCustomObject]@{ Name = $Name; State = 'Stopped'; PathName = $entry.ExpectedImage; StartName = '.\cloudbase-init' }
+        }
+        return $null
+    }
     function Get-CTIfEOState {
         param([string]$Image)
         $present = $script:PreflightFixtureGuardMode -eq 'Conflict' -or
@@ -307,9 +321,27 @@ $preflightRegression = & $module {
         [PSCustomObject]@{ Classification = 'Absent'; States = @() }
     }
     function Get-ScheduledTask { [CmdletBinding()] param() return @() }
-    function Get-LocalUser { [CmdletBinding()] param() return @() }
-    function Get-CimInstance { [CmdletBinding()] param([string]$ClassName) return @() }
+    function Get-LocalUser { [CmdletBinding()] param() return @($script:PreflightFixtureUsers) }
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param([string]$ClassName, [string]$Filter)
+        if ($ClassName -eq 'Win32_UserProfile') { return @($script:PreflightFixtureProfiles) }
+        return @()
+    }
     function Get-ChildItem { [CmdletBinding()] param([string]$Path) return @() }
+    function Test-Path {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$PathType)
+        if ([string]$LiteralPath -like 'Registry::HKEY_USERS\*') { return [bool]$script:PreflightFixtureHiveMounted }
+        return $true
+    }
+    function Get-AuthenticodeSignature { [CmdletBinding()] param([string]$LiteralPath) [PSCustomObject]@{ Status = 'Valid' } }
+    function Get-CTMachineSid { return 'S-1-5-21-1-2-3' }
+    function Get-CTCloudbaseOwnedProcessEvidence { param([string]$Sid, [hashtable]$Manifest) return @($script:PreflightFixtureOwnedProcesses) }
+    function Get-CTCloudbaseIdentityReferences { param([string]$Sid) return @($script:PreflightFixtureReferences) }
+    function Get-CTCloudbaseIdentityAnchors { param([string]$Sid, [hashtable]$Manifest, [object[]]$TaskSnapshot) return @($script:PreflightFixtureIdentityAnchors) }
+
+    $script:PreflightFixtureManifest = $FixtureManifest
 
     $initial = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs'
     $script:PreflightFixtureGuardMode = 'Conflict'
@@ -341,11 +373,58 @@ $preflightRegression = & $module {
             }
         })
     })
+
+    $cloudbaseSid = 'S-1-5-21-1-2-3-1001'
+    $script:PreflightFixtureUsers = @([PSCustomObject]@{ Name = 'cloudbase-init'; SID = $cloudbaseSid; Enabled = $true })
+    $script:PreflightFixtureProfiles = @([PSCustomObject]@{ LocalPath = 'C:\Users\cloudbase-init'; SID = $cloudbaseSid; Loaded = $true; Special = $false })
+    $script:PreflightFixtureCloudbaseService = $true
+    $script:PreflightFixtureHiveMounted = $true
+    $script:PreflightFixtureOwnedProcesses = @([PSCustomObject]@{ Approved = $true; Failures = @() })
+    $script:PreflightFixtureReferences = @('service:cloudbase-init', 'task:\ecloud_update_agent_detect')
+    $script:PreflightFixtureIdentityAnchors = @('task:\ecloud_update_agent_detect')
+    $loadedPrepare = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Prepare
+    $loadedApply = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Apply
+    $script:PreflightFixtureProfiles[0].Special = $true
+    $specialPrepare = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Prepare
+    $script:PreflightFixtureProfiles[0].Special = $false
+    $script:PreflightFixtureOwnedProcesses = @()
+    $unexplainedLoadedPrepare = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Prepare
+    $script:PreflightFixtureOwnedProcesses = @([PSCustomObject]@{ Approved = $true; Failures = @() })
+    $script:PreflightFixtureIdentityAnchors = @()
+    $unanchoredLoadedPrepare = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Prepare
+    $script:PreflightFixtureIdentityAnchors = @('task:\ecloud_update_agent_detect')
+    $script:PreflightFixtureProfiles += [PSCustomObject]@{ LocalPath = 'C:\Users\cloudbase-init.MACHINE'; SID = $cloudbaseSid; Loaded = $true; Special = $true }
+    $alternateProfileApply = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Apply
+    $script:PreflightFixtureUsers = @()
+    $script:PreflightFixtureProfiles = @([PSCustomObject]@{ LocalPath = 'C:\Users\cloudbase-init.MACHINE'; SID = $cloudbaseSid; Loaded = $true; Special = $true })
+    $script:PreflightFixtureCloudbaseService = $false
+    $archivedAlternateProfileApply = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Phase Apply -Context ([PSCustomObject]@{
+        MachineSid = 'S-1-5-21-1-2-3'
+        Operations = @([PSCustomObject]@{
+            Type = 'CloudbaseIdentityEvidence'
+            Status = 'Completed'
+            Data = @{
+                State = 'PresentAtBaseline'
+                MachineSid = 'S-1-5-21-1-2-3'
+                CloudbaseRoot = $FixtureManifest.Roots.Cloudbase
+                AccountSid = $cloudbaseSid
+                ProfileSid = $cloudbaseSid
+                IdentityAnchors = @('task:\ecloud_update_agent_detect')
+            }
+        })
+    })
     [PSCustomObject]@{
         Initial = $initial
         GuardConflict = $guardConflict
         PendingGuard = $pendingGuard
         ArchivedIdentity = $archivedIdentity
+        LoadedPrepare = $loadedPrepare
+        LoadedApply = $loadedApply
+        SpecialPrepare = $specialPrepare
+        UnexplainedLoadedPrepare = $unexplainedLoadedPrepare
+        UnanchoredLoadedPrepare = $unanchoredLoadedPrepare
+        AlternateProfileApply = $alternateProfileApply
+        ArchivedAlternateProfileApply = $archivedAlternateProfileApply
     }
 } $manifest
 Assert-CTCoreTrust -Condition $preflightRegression.Initial.Passed -Message "Initial preflight with empty context collections failed: $($preflightRegression.Initial.Errors -join '; ')"
@@ -353,6 +432,215 @@ Assert-CTCoreTrust -Condition (-not $preflightRegression.GuardConflict.Passed) -
 Assert-CTCoreTrust -Condition (@($preflightRegression.GuardConflict.Errors | Where-Object { $_ -match 'Existing unknown or differently owned IFEO' }).Count -gt 0) -Message 'Execution-guard regression test did not reach the intended conflict check.'
 Assert-CTCoreTrust -Condition $preflightRegression.PendingGuard.Passed -Message "Preflight failed with exactly one owned pending guard: $($preflightRegression.PendingGuard.Errors -join '; ')"
 Assert-CTCoreTrust -Condition $preflightRegression.ArchivedIdentity.Passed -Message "Preflight failed with exactly one archived Cloudbase identity record: $($preflightRegression.ArchivedIdentity.Errors -join '; ')"
+Assert-CTCoreTrust -Condition $preflightRegression.LoadedPrepare.Passed -Message "Prepare rejected the exact approved loaded Cloudbase profile holder: $($preflightRegression.LoadedPrepare.Errors -join '; ')"
+Assert-CTCoreTrust -Condition (@($preflightRegression.LoadedPrepare.Warnings | Where-Object { $_ -match 'loaded only by the approved TaskAgentDetect' }).Count -eq 1) -Message 'Prepare did not report the loaded Cloudbase profile deferral warning.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.LoadedApply.Passed) -Message 'Apply accepted a loaded Cloudbase profile.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.SpecialPrepare.Passed) -Message 'Prepare accepted a Special Cloudbase profile.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.UnexplainedLoadedPrepare.Passed) -Message 'Prepare accepted a loaded Cloudbase profile with no approved owner process.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.UnanchoredLoadedPrepare.Passed) -Message 'Prepare accepted a Cloudbase account/Profile with no service or scheduled-task principal SID anchor.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.AlternateProfileApply.Passed) -Message 'Apply accepted an additional same-SID Cloudbase Profile at an alternate path.'
+Assert-CTCoreTrust -Condition (-not $preflightRegression.ArchivedAlternateProfileApply.Passed) -Message 'Apply mutation-boundary preflight ignored an alternate-path Profile found only through archived SID evidence.'
+
+Import-Module -Name $modulePath -Force
+$module = Get-Module CTyunTrim
+$anchorPolicy = & $module {
+    param($FixtureManifest)
+    function Get-CTServiceByName { param([string]$Name, [switch]$Driver) return $null }
+    $sid = 'S-1-5-21-1-2-3-1001'
+    $entry = @($FixtureManifest.ScheduledTasks | Where-Object { $_.Name -eq 'ecloud_update_agent_detect' }) | Select-Object -First 1
+    function New-AnchorTask {
+        param([string]$PrincipalSid)
+        [PSCustomObject]@{
+            TaskName = $entry.Name
+            TaskPath = $entry.TaskPath
+            Principal = [PSCustomObject]@{ UserId = $PrincipalSid; GroupId = $null }
+            Actions = @([PSCustomObject]@{
+                Execute = $entry.ExpectedImage
+                Arguments = ''
+                CimClass = [PSCustomObject]@{ CimClassName = 'MSFT_TaskExecAction' }
+            })
+        }
+    }
+    [PSCustomObject]@{
+        Exact = @(Get-CTCloudbaseIdentityAnchors -Sid $sid -Manifest $FixtureManifest -TaskSnapshot @((New-AnchorTask -PrincipalSid $sid)))
+        Wrong = @(Get-CTCloudbaseIdentityAnchors -Sid $sid -Manifest $FixtureManifest -TaskSnapshot @((New-AnchorTask -PrincipalSid 'S-1-5-21-1-2-3-1002')))
+    }
+} $manifest
+Assert-CTCoreTrust -Condition ($anchorPolicy.Exact.Count -eq 1 -and $anchorPolicy.Exact[0] -eq 'task:\ecloud_update_agent_detect') -Message 'Exact scheduled-task principal SID did not establish the Cloudbase identity anchor.'
+Assert-CTCoreTrust -Condition ($anchorPolicy.Wrong.Count -eq 0) -Message 'A different scheduled-task principal SID established the Cloudbase identity anchor.'
+
+$cloudbaseProcessPolicy = & $module {
+    param($FixtureManifest)
+    $sid = 'S-1-5-21-1-2-3-1001'
+    $expectedImage = [string](@($FixtureManifest.ScheduledTasks | Where-Object { $_.Name -eq 'ecloud_update_agent_detect' })[0].ExpectedImage)
+    function New-ProcessEvidence {
+        param(
+            [string]$Path = $expectedImage,
+            [string]$OwnerSid = $sid,
+            [uint32]$SessionId = 0,
+            [string]$SignatureStatus = 'Valid',
+            [bool]$HasReparsePoint = $false,
+            [bool]$SecureSource = $true,
+            [bool]$Stable = $true
+        )
+        [PSCustomObject]@{
+            ProcessId = [int]4321
+            ProcessName = 'TaskAgentDetect'
+            CimName = 'TaskAgentDetect.exe'
+            Path = $Path
+            CimPath = $Path
+            OwnerSid = $OwnerSid
+            SessionId = $SessionId
+            StartTimeUtcTicks = '638925120000000000'
+            SignatureStatus = $SignatureStatus
+            FileSha256 = (('A' * 64) -join '')
+            HasReparsePoint = $HasReparsePoint
+            SecureSource = $SecureSource
+            Stable = $Stable
+        }
+    }
+    $stringSecure = New-ProcessEvidence
+    $stringSecure.SecureSource = 'false'
+    $stringStable = New-ProcessEvidence
+    $stringStable.Stable = 'true'
+    $stringSession = New-ProcessEvidence
+    $stringSession.SessionId = '0'
+    [PSCustomObject]@{
+        Good = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence) -ExpectedSid $sid -ExpectedImage $expectedImage
+        WrongPath = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -Path 'C:\Temp\TaskAgentDetect.exe') -ExpectedSid $sid -ExpectedImage $expectedImage
+        WrongOwner = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -OwnerSid 'S-1-5-21-1-2-3-1002') -ExpectedSid $sid -ExpectedImage $expectedImage
+        Interactive = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -SessionId 2) -ExpectedSid $sid -ExpectedImage $expectedImage
+        InvalidSignature = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -SignatureStatus 'UnknownError') -ExpectedSid $sid -ExpectedImage $expectedImage
+        Reparse = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -HasReparsePoint $true) -ExpectedSid $sid -ExpectedImage $expectedImage
+        UnsafeAcl = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -SecureSource $false) -ExpectedSid $sid -ExpectedImage $expectedImage
+        Unstable = Test-CTCloudbasePrepareProcessEvidence -Evidence (New-ProcessEvidence -Stable $false) -ExpectedSid $sid -ExpectedImage $expectedImage
+        StringSecure = Test-CTCloudbasePrepareProcessEvidence -Evidence $stringSecure -ExpectedSid $sid -ExpectedImage $expectedImage
+        StringStable = Test-CTCloudbasePrepareProcessEvidence -Evidence $stringStable -ExpectedSid $sid -ExpectedImage $expectedImage
+        StringSession = Test-CTCloudbasePrepareProcessEvidence -Evidence $stringSession -ExpectedSid $sid -ExpectedImage $expectedImage
+    }
+} $manifest
+Assert-CTCoreTrust -Condition $cloudbaseProcessPolicy.Good.Passed -Message "Exact TaskAgentDetect process evidence was rejected: $($cloudbaseProcessPolicy.Good.Failures -join ', ')"
+foreach ($property in @('WrongPath', 'WrongOwner', 'Interactive', 'InvalidSignature', 'Reparse', 'UnsafeAcl', 'Unstable', 'StringSecure', 'StringStable', 'StringSession')) {
+    Assert-CTCoreTrust -Condition (-not $cloudbaseProcessPolicy.$property.Passed) -Message "Unsafe Cloudbase process evidence passed: $property"
+}
+
+Import-Module -Name $modulePath -Force
+$module = Get-Module CTyunTrim
+$ownerEnumeration = & $module {
+    $targetSid = 'S-1-5-21-1-2-3-1001'
+    $otherSid = 'S-1-5-18'
+    $script:OwnerFixtureInaccessiblePid = $null
+    $script:OwnerFixtureQueryThrowsPid = $null
+    $script:OwnerFixtureProcesses = @(
+        [PSCustomObject]@{ ProcessId = [uint32]100; Name = 'TaskAgentDetect.exe'; ExecutablePath = 'C:\Approved\TaskAgentDetect.exe'; SessionId = [uint32]0; CreationDate = '20260905000100.000000+480'; OwnerSid = $targetSid; OwnerReturn = [uint32]0 },
+        [PSCustomObject]@{ ProcessId = [uint32]101; Name = 'Other.exe'; ExecutablePath = 'C:\Approved\Other.exe'; SessionId = [uint32]0; CreationDate = '20260905000200.000000+480'; OwnerSid = $targetSid; OwnerReturn = [uint32]0 },
+        [PSCustomObject]@{ ProcessId = [uint32]102; Name = 'SystemLike.exe'; ExecutablePath = 'C:\Windows\System32\SystemLike.exe'; SessionId = [uint32]0; CreationDate = '20260905000300.000000+480'; OwnerSid = $otherSid; OwnerReturn = [uint32]0 }
+    )
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param([string]$ClassName, [string]$Filter)
+        if ([string]::IsNullOrWhiteSpace($Filter)) { return @($script:OwnerFixtureProcesses) }
+        if ($Filter -match 'ProcessId = (?<pid>[0-9]+)') {
+            if ($null -ne $script:OwnerFixtureQueryThrowsPid -and [uint32]$matches.pid -eq [uint32]$script:OwnerFixtureQueryThrowsPid) {
+                throw 'Synthetic targeted CIM query failure.'
+            }
+            return @($script:OwnerFixtureProcesses | Where-Object { [uint32]$_.ProcessId -eq [uint32]$matches.pid })
+        }
+        return @()
+    }
+    function Invoke-CimMethod {
+        [CmdletBinding()]
+        param([PSObject]$InputObject, [string]$MethodName)
+        [PSCustomObject]@{ ReturnValue = [uint32]$InputObject.OwnerReturn; Sid = [string]$InputObject.OwnerSid }
+    }
+    function Get-Process {
+        [CmdletBinding()]
+        param([int]$Id)
+        if ($null -ne $script:OwnerFixtureInaccessiblePid -and $Id -eq [int]$script:OwnerFixtureInaccessiblePid) { return $null }
+        $item = @($script:OwnerFixtureProcesses | Where-Object { [int]$_.ProcessId -eq $Id }) | Select-Object -First 1
+        if ($null -eq $item) { return $null }
+        [PSCustomObject]@{ Id = $Id; ProcessName = [IO.Path]::GetFileNameWithoutExtension([string]$item.Name); Path = [string]$item.ExecutablePath; StartTime = [datetime]'2026-09-05T00:00:00Z' }
+    }
+
+    $twoOwners = @(Get-CTProcessesByOwnerSid -Sid $targetSid)
+    $script:OwnerFixtureInaccessiblePid = 100
+    $inaccessibleTargetRejected = $false
+    try { $null = @(Get-CTProcessesByOwnerSid -Sid $targetSid) }
+    catch { $inaccessibleTargetRejected = $_.Exception.Message -match 'live target-SID process could not be inspected' }
+    $script:OwnerFixtureQueryThrowsPid = 100
+    $targetQueryFailureRejected = $false
+    try { $null = @(Get-CTProcessesByOwnerSid -Sid $targetSid) }
+    catch { $targetQueryFailureRejected = $_.Exception.Message -match 'Targeted process liveness query failed' }
+    $script:OwnerFixtureInaccessiblePid = $null
+    $script:OwnerFixtureProcesses += [PSCustomObject]@{ ProcessId = [uint32]103; Name = 'Unresolved.exe'; ExecutablePath = $null; SessionId = [uint32]0; CreationDate = '20260905000400.000000+480'; OwnerSid = $null; OwnerReturn = [uint32]2 }
+    $script:OwnerFixtureQueryThrowsPid = 103
+    $initialQueryFailureRejected = $false
+    try { $null = @(Get-CTProcessesByOwnerSid -Sid $targetSid) }
+    catch { $initialQueryFailureRejected = $_.Exception.Message -match 'remained unresolved' }
+    $script:OwnerFixtureQueryThrowsPid = $null
+    $unresolvedRejected = $false
+    try { $null = @(Get-CTProcessesByOwnerSid -Sid $targetSid) }
+    catch { $unresolvedRejected = $_.Exception.Message -match 'remained unresolved' }
+    [PSCustomObject]@{
+        TargetOwnerCount = $twoOwners.Count
+        InaccessibleTargetRejected = $inaccessibleTargetRejected
+        TargetQueryFailureRejected = $targetQueryFailureRejected
+        InitialQueryFailureRejected = $initialQueryFailureRejected
+        UnresolvedRejected = $unresolvedRejected
+    }
+}
+Assert-CTCoreTrust -Condition ($ownerEnumeration.TargetOwnerCount -eq 2) -Message 'Full Win32_Process owner-SID enumeration missed a target-owned process without UserName filtering.'
+Assert-CTCoreTrust -Condition $ownerEnumeration.InaccessibleTargetRejected -Message 'Owner-SID enumeration treated an inaccessible live target-owned process as exited.'
+Assert-CTCoreTrust -Condition $ownerEnumeration.TargetQueryFailureRejected -Message 'Owner-SID enumeration treated a failed target liveness query as process exit.'
+Assert-CTCoreTrust -Condition $ownerEnumeration.InitialQueryFailureRejected -Message 'Owner-SID enumeration treated a failed owner retry query as process exit.'
+Assert-CTCoreTrust -Condition $ownerEnumeration.UnresolvedRejected -Message 'Owner-SID enumeration did not fail closed for a persistent unresolved process.'
+
+Import-Module -Name $modulePath -Force
+$module = Get-Module CTyunTrim
+$alternateProfileRemoval = & $module {
+    param($FixtureManifest)
+    $machineSid = 'S-1-5-21-1-2-3'
+    $expectedSid = "$machineSid-1001"
+    $script:AccountDeletionReached = $false
+    $account = [PSCustomObject]@{ Name = 'cloudbase-init'; SID = $expectedSid; Enabled = $true }
+    $alternateProfile = [PSCustomObject]@{ LocalPath = 'C:\Users\cloudbase-init.MACHINE'; SID = $expectedSid; Loaded = $true; Special = $true }
+    function Get-LocalUser { [CmdletBinding()] param() return @($account) }
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param([string]$ClassName, [string]$Filter)
+        if ($ClassName -eq 'Win32_UserProfile') { return @($alternateProfile) }
+        return @()
+    }
+    function Remove-LocalUser { [CmdletBinding()] param([object]$SID) $script:AccountDeletionReached = $true }
+    function Invoke-RemovalFixture {
+        [CmdletBinding(SupportsShouldProcess = $true)]
+        param()
+        Remove-CTCloudbaseIdentity -Context $context -Manifest $FixtureManifest -Caller $PSCmdlet
+    }
+    $serviceEntry = @($FixtureManifest.Services | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
+    $context = [PSCustomObject]@{
+        MachineSid = $machineSid
+        Operations = @([PSCustomObject]@{
+            Type = 'CloudbaseIdentityEvidence'
+            Status = 'Completed'
+            Data = @{
+                State = 'PresentAtBaseline'
+                MachineSid = $machineSid
+                CloudbaseRoot = $FixtureManifest.Roots.Cloudbase
+                AccountSid = $expectedSid
+                ProfileSid = $expectedSid
+                Services = @([PSCustomObject]@{ Name = 'cloudbase-init'; ResolvedImage = $serviceEntry.ExpectedImage })
+                IdentityAnchors = @('task:\ecloud_update_agent_detect')
+            }
+        })
+    }
+    $blocked = $false
+    try { Invoke-RemovalFixture -Confirm:$false | Out-Null }
+    catch { $blocked = $_.Exception.Message -match 'unexpected or additional user Profile path' }
+    [PSCustomObject]@{ Blocked = $blocked; AccountDeletionReached = $script:AccountDeletionReached }
+} $manifest
+Assert-CTCoreTrust -Condition $alternateProfileRemoval.Blocked -Message 'Cloudbase removal did not block an alternate-path Profile sharing the archived SID.'
+Assert-CTCoreTrust -Condition (-not $alternateProfileRemoval.AccountDeletionReached) -Message 'Cloudbase account deletion was reached despite an unsafe alternate-path Profile.'
 
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4-Diagnostic - 2026-09-05
+
+- Added a Prepare-only exception for the observed loaded Cloudbase profile when its sole holder is the exact, service-session `TaskAgentDetect.exe` scheduled-task image with matching owner SID, trusted signature, secure path and stable process identity.
+- Kept `Special` profiles and every loaded or mounted-hive profile in Apply as hard failures; CTyunTrim never force-unloads the user hive.
+- Added an immutable service/task-principal SID ownership anchor, full owner-SID process enumeration and same-SID Profile-path checks before accepting or deleting the Cloudbase identity.
+- Reordered Cloudbase cleanup to journal and prove the account disabled, recheck owner processes at the Profile deletion boundary, remove the unloaded Profile, and only then remove the local account.
+- Added sanitized loaded, Special, hive-mounted and identity-match profile counts to diagnostic output.
+- Fixed negative messages containing `loaded` from being mislabeled as diagnostic `Success`.
+- Added Prepare/Apply phase and unsafe-process regression tests.
+
 ## 0.1.3-Diagnostic - 2026-09-04
 
 - Fixed Windows PowerShell 5.1 scalar unrolling of empty/single conditional collections in initial Cloudbase preflight and execution-guard resume checks.

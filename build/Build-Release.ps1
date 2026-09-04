@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$')]
-    [string]$Version = '0.1.3-Diagnostic'
+    [string]$Version = '0.1.4-Diagnostic'
 )
 
 Set-StrictMode -Version 2.0
