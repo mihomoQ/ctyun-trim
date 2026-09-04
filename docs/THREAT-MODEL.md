@@ -35,7 +35,8 @@ The implementation treats service paths, task actions, manifests and filesystem 
 - no wildcard removal;
 - immutable reference-manifest hash and fixed root anchors;
 - exact service, task path, task action and image identities;
-- versioned core ImagePath/signature/version fingerprinting;
+- versioned core ImagePath/signature/version fingerprinting, including an exact file-hash and embedded-signer tuple for the one approved self-signed Balloon binary;
+- locked double-hash inspection and rejection of core paths writable by untrusted principals;
 - protected-path ancestor checks;
 - reparse-point rejection;
 - an immutable official LGPO v3.0 binary hash, parent-ACL checks and Microsoft signature validation before invoking a protected staged copy;

@@ -11,6 +11,18 @@ clipa               Running / Automatic
 cloudshare_service  Running / Automatic
 ```
 
+Observed Balloon service binary identity:
+
+```text
+Path                C:\Program Files (x86)\ctyun\clink\drivers\Balloon\blnsvr.exe
+SHA-256             1B821F556FFC8F998196CDBFEE6D84846600D39EB1B584D182BFCC5AB6DFCD4E
+Signer thumbprint   301C73596BAC4FE8EE33487687BD75FCC307FFC6
+Signer              CN=Red Hat Inc., OU=Dev, O=virtio-win
+Signature status    UnknownError (self-issued root is not trusted by Windows)
+```
+
+This tuple is pinned only to recognize the preserved binary. The signer certificate is not installed into a Windows trust store, and a future VirtIO binary requires an explicit profile update.
+
 The versioned destructive fingerprint records `clipa.win.exe` numeric file version `2.1.0.0`. Core service and driver registrations must also resolve to the exact paths encoded in `config/CTyunTrim.psd1`; names alone are insufficient.
 
 Observed process tree:

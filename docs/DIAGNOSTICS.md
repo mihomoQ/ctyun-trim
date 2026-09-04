@@ -38,6 +38,8 @@ For privacy, the envelope's `Result` is a reduced status summary rather than the
 
 The primary operation and diagnostic export have separate status fields. A failed Verify or failed primary operation remains a failure even when the support ZIP was generated successfully. If a primary Prepare/Apply succeeds but diagnostic export fails, the primary exit status is preserved and `Diagnostic.Succeeded=false` is reported; do not repeat destructive work merely to regenerate diagnostics. Run a later read-only `Audit -Diagnostic -RunId <RunId>` instead.
 
+For `Audit`, `Plan`, `Verify` and either destructive mode under `-WhatIf`, a requested diagnostic export that fails returns a nonzero process exit after emitting the JSON envelope. These operations are safe to rerun, so callers must not silently treat a missing requested bundle as success.
+
 ## Archive allowlist
 
 Every archive contains exactly:
@@ -49,7 +51,7 @@ events.jsonl
 README.txt
 ```
 
-`summary.json` contains stable component IDs, Boolean state, counts, preflight reason codes, journal status and a reduced result summary. `environment.json` contains only tool/runtime and Windows build information. `events.jsonl` contains bounded structured events with stable codes and allowlisted numeric/status fields.
+`summary.json` contains stable component IDs, Boolean state, counts, preflight reason codes, journal status and a reduced result summary. Core entries include an allowlisted trust mode plus `SecureSource`, `HashMatches`, `SignerPresent`, `SignerMatches` and `TrustSatisfied` states; actual hashes and signer identities remain excluded. `environment.json` contains only tool/runtime and Windows build information. `events.jsonl` contains bounded structured events with stable codes and allowlisted numeric/status fields.
 
 The archive never copies files from the RunId directory. Specifically excluded are:
 

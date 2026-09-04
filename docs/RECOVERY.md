@@ -30,7 +30,7 @@ Pass that same RunId to `Verify`; it binds the final account check to the Cloudb
 
 ## Automated Restore status
 
-Automated Restore is disabled in 0.1.1. A safe recovery engine must compare every current object with the post-Apply state and restore exact values without overwriting newer tasks, services or policy. Until that is implemented and tested, CTyunTrim fails closed.
+Automated Restore is disabled in 0.1.2. A safe recovery engine must compare every current object with the post-Apply state and restore exact values without overwriting newer tasks, services or policy. Until that is implemented and tested, CTyunTrim fails closed.
 
 ## Recovery limitations
 
@@ -52,4 +52,4 @@ Do not continue deleting. Use the provider recovery console and either:
 1. roll back the tested snapshot; or
 2. perform evidence-led manual recovery from one exact RunId directory, then reboot and retest.
 
-There is no automated execution-guard, task, service, certificate, account or LocalGPO restore command in 0.1.1.
+There is no automated execution-guard, task, service, certificate, account or LocalGPO restore command in 0.1.2.

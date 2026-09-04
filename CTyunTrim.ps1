@@ -171,6 +171,11 @@ try {
 
     if ($Json) { $output | ConvertTo-Json -Depth 14 } else { $output }
     if ($verificationFailed) { throw 'CTyunTrim verification failed. Review the emitted Failures collection.' }
+    $diagnosticFailureIsFatal = $Diagnostic -and $null -eq $bundle -and
+        ($WhatIfPreference -or $Mode -in @('Audit', 'Plan', 'Verify'))
+    if ($diagnosticFailureIsFatal) {
+        throw "CTyunTrim diagnostic export failed: $diagnosticErrorCode"
+    }
 }
 finally {
     if ($Diagnostic) {
