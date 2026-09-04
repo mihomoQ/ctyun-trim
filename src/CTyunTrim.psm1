@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.2-Diagnostic'
+$script:CTyunTrimVersion = '0.1.3-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -4449,10 +4449,10 @@ function Test-CTApplyPreflight {
         $guard = Get-CTIfEOState -Image $image
         if ($guard.Present) {
             $requestedRunId = if ($null -ne $Context) { [string]$Context.RunId } else { [string]$RunId }
-            $pending = if ($null -ne $Context) {
-                @($Context.Operations | Where-Object { $_.Status -eq 'Pending' -and $_.Type -eq 'ExecutionGuard' -and $_.Target -eq $image })
+            $pending = @()
+            if ($null -ne $Context) {
+                $pending = @($Context.Operations | Where-Object { $_.Status -eq 'Pending' -and $_.Type -eq 'ExecutionGuard' -and $_.Target -eq $image })
             }
-            else { @() }
             $fullOwned = ($guard.Debugger -eq $script:GuardDebugger) -and ($guard.Marker -eq $script:GuardOwner) -and ([string]$guard.RunId -eq $requestedRunId)
             $pendingRunId = if ($pending.Count -eq 1) { [string](Get-CTPropertyValue -InputObject $pending[0].Data -Name 'RunId') } else { $null }
             $partialOwned = ($pending.Count -eq 1) -and ($pendingRunId -eq $requestedRunId) -and
@@ -4542,10 +4542,10 @@ function Test-CTApplyPreflight {
     if ($null -ne $cloudbaseAccount -and $cloudbaseProfiles.Count -eq 1 -and [string]$cloudbaseAccount.SID -ne [string]$cloudbaseProfiles[0].SID) {
         $errors.Add('cloudbase-init account and profile SIDs do not match.')
     }
-    $archivedEvidence = if ($null -ne $Context) {
-        @($Context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' })
+    $archivedEvidence = @()
+    if ($null -ne $Context) {
+        $archivedEvidence = @($Context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' })
     }
-    else { @() }
     if ($null -ne $cloudbaseAccount -or $cloudbaseProfiles.Count -gt 0 -or $archivedEvidence.Count -gt 0) {
         $validCloudbaseServices = @($Manifest.Services | Where-Object { $_.Name -in @('cloudbase-init', 'cloudbase-init-unattend') } | ForEach-Object {
             $service = Get-CTServiceByName -Name $_.Name

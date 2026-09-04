@@ -77,7 +77,7 @@ Assert-CT -Condition ($sourceText -notmatch '(?i)Win32_Product') -Message 'Win32
 Assert-CT -Condition ($sourceText -notmatch '(?i)Invoke-Expression') -Message 'Invoke-Expression is forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Start-Transcript') -Message 'Unstructured PowerShell transcripts are forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Remove-Item.+System32\\GroupPolicy') -Message 'Deleting the complete GroupPolicy directory is forbidden.'
-Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.2') -Message 'ModuleVersion is not 0.1.2.'
+Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.3') -Message 'ModuleVersion is not 0.1.3.'
 Assert-CT -Condition ([string]$moduleManifest.PrivateData.PSData.Prerelease -eq 'Diagnostic') -Message 'Module prerelease label is not Diagnostic.'
 Assert-CT -Condition (@($moduleManifest.FunctionsToExport) -contains 'New-CTyunTrimDiagnosticBundle') -Message 'Diagnostic bundle exporter is not declared in the module manifest.'
 $diagnosticResultSafety = & (Get-Module CTyunTrim) {
@@ -289,7 +289,7 @@ try {
     $buildThrew = $false
     try { & (Join-Path $root 'build\Build-Release.ps1') -Version '..\..\config' | Out-Null } catch { $buildThrew = $true }
     Assert-CT -Condition $buildThrew -Message 'Release builder accepted a path-traversal version.'
-    foreach ($invalidVersion in @('0.1.2-Diagnostic.', '0.1.2--Diagnostic', '0.1.2-Diagnostic:')) {
+    foreach ($invalidVersion in @('0.1.3-Diagnostic.', '0.1.3--Diagnostic', '0.1.3-Diagnostic:')) {
         $invalidVersionThrew = $false
         try { & (Join-Path $root 'build\Build-Release.ps1') -Version $invalidVersion | Out-Null } catch { $invalidVersionThrew = $true }
         Assert-CT -Condition $invalidVersionThrew -Message "Release builder accepted an unsafe prerelease version: $invalidVersion"

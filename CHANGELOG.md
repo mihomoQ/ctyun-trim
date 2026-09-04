@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3-Diagnostic - 2026-09-04
+
+- Fixed Windows PowerShell 5.1 scalar unrolling of empty/single conditional collections in initial Cloudbase preflight and execution-guard resume checks.
+- Added full preflight regression fixtures for a fresh empty context, one owned pending guard, one archived Cloudbase identity record and an unknown guard conflict.
+- Confirmed the reported failure occurs before RunId creation or any Prepare system mutation.
+
 ## 0.1.2-Diagnostic - 2026-09-04
 
 - Added an exact `PinnedHashAndSigner` trust policy for the observed VirtIO `BalloonService` binary whose Red Hat development certificate chains to an untrusted self-issued root.
