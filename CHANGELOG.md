@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.1-Diagnostic - 2026-09-04
+
+- Added the opt-in `-Diagnostic` modifier without forking the destructive execution path.
+- Added a four-entry, strict-allowlist support ZIP with an external SHA-256 sidecar.
+- Added structured operation, preflight, journal, reboot and native-command event summaries.
+- Added stateless and RunId-bound diagnostics while excluding raw run backups and sensitive host data.
+- Added diagnostic success/failure JSON envelopes and preserved primary failure exit behavior.
+- Added dedicated sanitization, archive-integrity, failure-path and read-only tests.
+
+## 0.1.0 - 2026-09-04
 
 - Added the `MinimalInterop` versioned component manifest.
 - Added read-only `Audit`, `Plan`, and `Verify` modes.

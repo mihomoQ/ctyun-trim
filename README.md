@@ -5,7 +5,7 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.0**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
+当前状态：**Experimental / 0.1.1-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
 
 ## 项目目标
 
@@ -97,11 +97,31 @@ Start-CTyunTrim.cmd -Mode Audit
 - 或显式传入 `-LgpoPath`。
 
 脚本不会下载或静默执行任何远程代码，也不会携带或重新分发 `LGPO.exe`。
-找到候选文件后，脚本会要求它逐字节匹配 0.1.0 中固定的微软 LGPO v3.0 SHA-256，再检查签名与父目录 ACL，把它复制到当前 RunId 的受保护目录并复验；实际执行的始终是该受保护副本。固定哈希与微软官方下载地址见 [tools/README.md](tools/README.md)。
+找到候选文件后，脚本会要求它逐字节匹配内置的微软 LGPO v3.0 SHA-256，再检查签名与父目录 ACL，把它复制到当前 RunId 的受保护目录并复验；实际执行的始终是该受保护副本。固定哈希与微软官方下载地址见 [tools/README.md](tools/README.md)。
+
+### Diagnostic 版本
+
+`-Diagnostic` 使用与正式执行完全相同的代码路径，只额外生成脱敏诊断包：
+
+```powershell
+# 只读盘点并生成诊断包
+.\Start-CTyunTrim.cmd -Mode Audit -Diagnostic -Json
+
+# Prepare/Apply 也可记录相同 RunId 的执行与中断状态
+.\Start-CTyunTrim.cmd -Mode Prepare -Force -Diagnostic
+.\Start-CTyunTrim.cmd -Mode Apply -RunId <RunId> -Force -Diagnostic
+
+# WhatIf 仍不修改目标系统，但会写入明确请求的诊断 ZIP
+.\Start-CTyunTrim.cmd -Mode Apply -WhatIf -Diagnostic -Json
+```
+
+诊断 ZIP 固定只包含 `summary.json`、`environment.json`、`events.jsonl` 和 `README.txt`，旁边生成 SHA-256 文件。它不会复制 RunId 目录，也不会包含注册表导出、任务 XML、证书、隔离文件、完整命令行、用户名、SID、IP/MAC/DNS、证书身份或凭据，更不会自动上传。
+
+Diagnostic 导出要求 64 位管理员 Windows PowerShell 5.1，并固定写入 Windows `CommonApplicationData\CTyunTrim\Diagnostics` Known Folder。`-Diagnostic` 与 `-Restart` 不可同时使用，确保 ZIP 已完成、校验并关闭后再由用户决定是否重启。详细格式见 [诊断说明](docs/DIAGNOSTICS.md)。
 
 ### 恢复
 
-Apply 会返回 `RunId` 和备份目录。0.1.0 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
+Apply 会返回 `RunId` 和备份目录。0.1.1 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
 
 ## 与 ReviOS 配合
 

@@ -49,6 +49,7 @@ foreach ($file in $powerShellFiles) {
 
 $manifestPath = Join-Path $root 'config\CTyunTrim.psd1'
 $modulePath = Join-Path $root 'src\CTyunTrim.psd1'
+$moduleManifest = Import-PowerShellDataFile -LiteralPath $modulePath
 Import-Module -Name $modulePath -Force
 
 $validation = Test-CTyunTrimManifest -ManifestPath $manifestPath
@@ -74,7 +75,22 @@ $implementationFiles = @($powerShellFiles | Where-Object { $_.FullName -notmatch
 $sourceText = ($implementationFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
 Assert-CT -Condition ($sourceText -notmatch '(?i)Win32_Product') -Message 'Win32_Product is forbidden because it can trigger MSI self-repair.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Invoke-Expression') -Message 'Invoke-Expression is forbidden.'
+Assert-CT -Condition ($sourceText -notmatch '(?i)Start-Transcript') -Message 'Unstructured PowerShell transcripts are forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Remove-Item.+System32\\GroupPolicy') -Message 'Deleting the complete GroupPolicy directory is forbidden.'
+Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.1') -Message 'ModuleVersion is not 0.1.1.'
+Assert-CT -Condition ([string]$moduleManifest.PrivateData.PSData.Prerelease -eq 'Diagnostic') -Message 'Module prerelease label is not Diagnostic.'
+Assert-CT -Condition (@($moduleManifest.FunctionsToExport) -contains 'New-CTyunTrimDiagnosticBundle') -Message 'Diagnostic bundle exporter is not declared in the module manifest.'
+$diagnosticResultSafety = & (Get-Module CTyunTrim) {
+    $view = Get-CTDiagnosticResultView -Result ([PSCustomObject]@{
+        Status = 'ULTRA_PRIVATE_CANARY_7F8B2D'
+        Passed = 'not-a-boolean'
+        RebootNeeded = 'not-a-boolean'
+        WarningCount = 'CANARY_COUNT'
+    })
+    $view | ConvertTo-Json -Compress
+}
+Assert-CT -Condition ($diagnosticResultSafety -notmatch 'ULTRA_PRIVATE_CANARY_7F8B2D|CANARY_COUNT|not-a-boolean') -Message 'Diagnostic result projection copied an untrusted scalar.'
+Assert-CT -Condition ($diagnosticResultSafety -match 'Unknown') -Message 'Diagnostic result projection did not map an unknown status to a stable enum.'
 
 $plan = @(Invoke-CTyunTrim -Mode Plan -ManifestPath $manifestPath)
 Assert-CT -Condition ($plan.Count -gt 20) -Message 'Plan unexpectedly contains too few actions.'
@@ -260,6 +276,11 @@ try {
     $buildThrew = $false
     try { & (Join-Path $root 'build\Build-Release.ps1') -Version '..\..\config' | Out-Null } catch { $buildThrew = $true }
     Assert-CT -Condition $buildThrew -Message 'Release builder accepted a path-traversal version.'
+    foreach ($invalidVersion in @('0.1.1-Diagnostic.', '0.1.1--Diagnostic', '0.1.1-Diagnostic:')) {
+        $invalidVersionThrew = $false
+        try { & (Join-Path $root 'build\Build-Release.ps1') -Version $invalidVersion | Out-Null } catch { $invalidVersionThrew = $true }
+        Assert-CT -Condition $invalidVersionThrew -Message "Release builder accepted an unsafe prerelease version: $invalidVersion"
+    }
 
     $junctionVersion = '0.1.0-junction-test'
     $junctionStage = Join-Path (Join-Path $root 'artifacts') "CTyunTrim-$junctionVersion"

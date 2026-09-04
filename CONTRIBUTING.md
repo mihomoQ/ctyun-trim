@@ -40,5 +40,6 @@ Rules based only on `*cloud*`, `*ctyun*`, display names, company names or broad 
 6. At least two reboots are tested on a disposable CTyun snapshot.
 7. Official reconnect, keyboard/mouse, display, text clipboard, ordinary file transfer, audio and network are manually verified.
 8. Recovery limitations are documented for every new irreversible action; automated Restore is not available.
+9. Diagnostic schema changes pass canary-leak, fixed-entry, size, hash, failure-path and read-only regression tests.
 
 Test fixtures and Issues must not contain real credentials or unsanitized machine data.

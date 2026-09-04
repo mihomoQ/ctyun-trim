@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.0'
+$script:CTyunTrimVersion = '0.1.1-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -27,6 +27,50 @@ $script:ApprovedExecutionGuards = @(
     'TaskLaunch.exe',
     'ecloud_Launch_FullSetup_103010306.exe'
 )
+$script:DiagnosticEnabled = $false
+$script:DiagnosticEvents = New-Object Collections.ArrayList
+$script:LastPreflightResult = $null
+$script:LastRunId = $null
+$script:DiagnosticInvocationId = $null
+$script:DiagnosticMode = $null
+
+function Initialize-CTDiagnosticState {
+    param(
+        [bool]$Enabled,
+        [Parameter(Mandatory = $true)][string]$Mode
+    )
+
+    $script:DiagnosticEnabled = $Enabled
+    $script:DiagnosticEvents = New-Object Collections.ArrayList
+    $script:LastPreflightResult = $null
+    $script:LastRunId = $null
+    $script:DiagnosticInvocationId = [guid]::NewGuid().ToString('N')
+    $script:DiagnosticMode = $Mode
+    if ($Enabled) {
+        Add-CTDiagnosticEvent -Level 'Info' -Stage 'Invocation' -Message "Started $Mode"
+    }
+}
+
+function Add-CTDiagnosticEvent {
+    param(
+        [ValidateSet('Info', 'Warning', 'Error')][string]$Level = 'Info',
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [hashtable]$Data = @{}
+    )
+
+    if (-not $script:DiagnosticEnabled) { return }
+    try {
+        [void]$script:DiagnosticEvents.Add([PSCustomObject]@{
+            Timestamp = (Get-Date).ToString('o')
+            Level     = $Level
+            Stage     = $Stage
+            Message   = $Message
+            Data      = $Data
+        })
+    }
+    catch { }
+}
 
 function Get-CTNormalizedTextHash {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1018,6 +1062,700 @@ function Get-CTPlan {
     return $actions.ToArray()
 }
 
+function Get-CTDiagnosticCode {
+    param([string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return 'None' }
+    if ($Message -match '(?i)\b(started|passed|completed|created|loaded|confirmed|recorded|reused|returned)\b') { return 'Success' }
+    switch -Regex ($Message) {
+        '(?i)manifest'                              { return 'ManifestValidationFailed' }
+        '(?i)unsupported Windows build'             { return 'UnsupportedWindowsBuild' }
+        '(?i)installation root|CTyun root'          { return 'InstallationRootMismatch' }
+        '(?i)protected service|core service'        { return 'CoreServiceMismatch' }
+        '(?i)protected driver|core driver'          { return 'CoreDriverMismatch' }
+        '(?i)protected path|core path'              { return 'CorePathMismatch' }
+        '(?i)scheduled task|TaskPath'               { return 'ScheduledTaskMismatch' }
+        '(?i)Run value|Run-value|StartupApproved'   { return 'StartupEntryMismatch' }
+        '(?i)IFEO|execution guard'                  { return 'ExecutionGuardMismatch' }
+        '(?i)WSUS|LocalPolicy|LGPO|Group Policy'    { return 'LocalPolicyFailure' }
+        '(?i)Cloudbase|cloudbase-init'              { return 'CloudbaseIdentityFailure' }
+        '(?i)certificate'                           { return 'CertificateFailure' }
+        '(?i)firewall'                              { return 'FirewallFailure' }
+        '(?i)registry backup|registry export'       { return 'RegistryBackupFailure' }
+        '(?i)reparse|junction|symbolic'              { return 'UnsafeReparsePoint' }
+        '(?i)backup root|quarantine'                { return 'BackupOrQuarantineFailure' }
+        '(?i)Windows PowerShell|administrator|64-bit' { return 'RuntimeRequirementFailed' }
+        '(?i)declined'                              { return 'OperationDeclined' }
+        '(?i)preflight'                             { return 'PreflightFailed' }
+        '(?i)reboot'                                { return 'RebootRequired' }
+        default                                     { return 'OperationFailed' }
+    }
+}
+
+function Get-CTDiagnosticIssueView {
+    param(
+        [object[]]$Messages,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest
+    )
+
+    $issues = New-Object Collections.Generic.List[object]
+    foreach ($message in @($Messages)) {
+        $text = [string]$message
+        $component = 'Unclassified'
+        foreach ($name in @($Manifest.Preserve.Services) + @($Manifest.Preserve.Drivers) +
+            @($Manifest.Services | ForEach-Object { $_.Name }) +
+            @($Manifest.DriverServices | ForEach-Object { $_.Name }) +
+            @($Manifest.ScheduledTasks | ForEach-Object { $_.Name }) +
+            @($Manifest.ExecutionGuards)) {
+            if ($text -match [regex]::Escape([string]$name)) {
+                $component = [string]$name
+                break
+            }
+        }
+        $issues.Add([PSCustomObject]@{
+            Code      = Get-CTDiagnosticCode -Message $text
+            Component = $component
+        })
+    }
+    return $issues.ToArray()
+}
+
+function Get-CTDiagnosticTargetId {
+    param(
+        [Parameter(Mandatory = $true)][string]$Type,
+        [string]$Target,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest
+    )
+
+    switch ($Type) {
+        'Service' { if (@($Manifest.Services.Name) -contains $Target) { return "Service:$Target" } }
+        'DriverService' { if (@($Manifest.DriverServices.Name) -contains $Target) { return "Driver:$Target" } }
+        'ExecutionGuard' { if (@($Manifest.ExecutionGuards) -contains $Target) { return "Guard:$Target" } }
+        'ScheduledTask' {
+            foreach ($task in $Manifest.ScheduledTasks) {
+                if ($Target -ieq "$($task.TaskPath)$($task.Name)") { return "Task:$($task.Name)" }
+            }
+        }
+        'ProcessStop' {
+            $name = ([string]$Target -split ':')[0]
+            if (@($Manifest.Processes) -contains $name) { return "Process:$name" }
+        }
+        'Certificate' {
+            for ($index = 0; $index -lt @($Manifest.KnownCertificates).Count; $index++) {
+                if ([string]$Manifest.KnownCertificates[$index].Thumbprint -eq $Target) { return ('Certificate:{0:D2}' -f ($index + 1)) }
+            }
+        }
+        'QuarantinePath' {
+            $paths = @($Manifest.Directories) + @($Manifest.Files) + @(Get-CTEncodedRemovalFiles -Manifest $Manifest) + @($Manifest.PublicDataDirectories)
+            for ($index = 0; $index -lt $paths.Count; $index++) {
+                if ([string]$paths[$index] -ieq $Target) { return ('RemovalPath:{0:D3}' -f ($index + 1)) }
+            }
+            return 'Shortcut'
+        }
+        'LocalPolicy' { return 'LocalPolicy:CTyunLoopbackWsus' }
+        'LocalUser' { return 'CloudbaseIdentity:Account' }
+        'UserProfile' { return 'CloudbaseIdentity:Profile' }
+        'CloudbaseIdentityEvidence' { return 'CloudbaseIdentity:Evidence' }
+        'Baseline' { return 'Run:Baseline' }
+        'FirewallRule' { return 'Firewall:CloudUpdateJre' }
+        'NativeCommand' {
+            $fileName = [IO.Path]::GetFileName([string]$Target)
+            if ($fileName -in @('reg.exe', 'sc.exe', 'gpupdate.exe', 'LGPO.exe', 'cmd.exe')) { return "Command:$fileName" }
+            return 'Command:Other'
+        }
+        'RunValue' {
+            for ($index = 0; $index -lt @($Manifest.RunValues).Count; $index++) {
+                if ($Target -like "*::$($Manifest.RunValues[$index].Name)") { return ('RunValue:{0:D2}' -f ($index + 1)) }
+            }
+            return 'StartupMetadata'
+        }
+    }
+    return $Type
+}
+
+function Get-CTDiagnosticEnumValue {
+    param(
+        [string]$Value,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [string]$Fallback = 'Unknown'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 'Unavailable' }
+    foreach ($candidate in $Allowed) {
+        if ([string]$Value -eq $candidate) { return $candidate }
+    }
+    return $Fallback
+}
+
+function Get-CTDiagnosticBoundedInteger {
+    param(
+        [object]$Value,
+        [long]$Minimum,
+        [long]$Maximum
+    )
+
+    if (-not ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64])) { return $null }
+    try { $number = [long]$Value } catch { return $null }
+    if ($number -lt $Minimum) { return $Minimum }
+    if ($number -gt $Maximum) { return $Maximum }
+    return $number
+}
+
+function Get-CTDiagnosticInventoryView {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Inventory,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest
+    )
+
+    $coreServices = foreach ($service in @($Inventory.CoreServices)) {
+        [PSCustomObject]@{
+            Id               = "Service:$($service.Name)"
+            Present          = [bool]$service.Present
+            State            = Get-CTDiagnosticEnumValue -Value ([string]$service.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending')
+            StartMode        = Get-CTDiagnosticEnumValue -Value ([string]$service.StartMode) -Allowed @('Auto', 'Manual', 'Disabled')
+            PathExpected     = [bool]$service.PathExpected
+            ImageExists      = [bool]$service.ImageExists
+            HasReparsePoint  = [bool]$service.HasReparsePoint
+            SignatureStatus  = Get-CTDiagnosticEnumValue -Value ([string]$service.SignatureStatus) -Allowed @('Valid', 'UnknownError', 'NotSigned', 'HashMismatch', 'NotTrusted', 'NotSupported', 'Incompatible')
+            VersionMatches   = [string]::IsNullOrWhiteSpace([string]$service.ExpectedFileVersion) -or [string]$service.FileVersion -eq [string]$service.ExpectedFileVersion
+        }
+    }
+    $coreDrivers = foreach ($driver in @($Inventory.CoreDrivers)) {
+        [PSCustomObject]@{
+            Id              = "Driver:$($driver.Name)"
+            Present         = [bool]$driver.Present
+            State           = Get-CTDiagnosticEnumValue -Value ([string]$driver.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending')
+            StartMode       = Get-CTDiagnosticEnumValue -Value ([string]$driver.StartMode) -Allowed @('Auto', 'Manual', 'Disabled')
+            PathExpected    = [bool]$driver.PathExpected
+            ImageExists     = [bool]$driver.ImageExists
+            HasReparsePoint = [bool]$driver.HasReparsePoint
+            SignatureStatus = Get-CTDiagnosticEnumValue -Value ([string]$driver.SignatureStatus) -Allowed @('Valid', 'UnknownError', 'NotSigned', 'HashMismatch', 'NotTrusted', 'NotSupported', 'Incompatible')
+        }
+    }
+    $removalServices = foreach ($service in @($Inventory.RemovalServices)) {
+        [PSCustomObject]@{ Id = "Service:$($service.Name)"; Present = [bool]$service.Present; State = Get-CTDiagnosticEnumValue -Value ([string]$service.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending'); PathExpected = [bool]$service.PathExpected }
+    }
+    $removalDrivers = foreach ($driver in @($Inventory.RemovalDrivers)) {
+        [PSCustomObject]@{ Id = "Driver:$($driver.Name)"; Present = [bool]$driver.Present; State = Get-CTDiagnosticEnumValue -Value ([string]$driver.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending'); PathExpected = [bool]$driver.PathExpected }
+    }
+    $tasks = foreach ($task in $Manifest.ScheduledTasks) {
+        $matches = @($Inventory.NonMicrosoftTasks | Where-Object { $_.TaskName -ieq $task.Name -and $_.TaskPath -ieq $task.TaskPath })
+        [PSCustomObject]@{ Id = "Task:$($task.Name)"; Present = ($matches.Count -gt 0); ActionCount = $matches.Count }
+    }
+    $paths = @($Inventory.RemovalPaths)
+    $pathStates = for ($index = 0; $index -lt $paths.Count; $index++) {
+        [PSCustomObject]@{ Id = ('RemovalPath:{0:D3}' -f ($index + 1)); Exists = [bool]$paths[$index].Exists }
+    }
+    $certificates = for ($index = 0; $index -lt @($Inventory.KnownCertificates).Count; $index++) {
+        [PSCustomObject]@{ Id = ('Certificate:{0:D2}' -f ($index + 1)); Present = [bool]$Inventory.KnownCertificates[$index].Present }
+    }
+    $guards = foreach ($guard in @($Inventory.ExecutionGuards)) {
+        [PSCustomObject]@{
+            Id              = "Guard:$($guard.Image)"
+            Present         = [bool]$guard.Present
+            DebuggerMatches = [string]$guard.Debugger -eq $script:GuardDebugger
+            MarkerMatches   = [string]$guard.Marker -eq $script:GuardOwner
+        }
+    }
+
+    return [PSCustomObject]@{
+        CoreServices       = @($coreServices)
+        CoreDrivers        = @($coreDrivers)
+        RemovalServices    = @($removalServices)
+        RemovalDrivers     = @($removalDrivers)
+        ScheduledTasks     = @($tasks)
+        RemovalPaths       = @($pathStates)
+        ExecutionGuards    = @($guards)
+        KnownCertificates  = @($certificates)
+        WsusClassification = [string](Get-CTWsusPolicySignature -Manifest $Manifest).Classification
+        CloudbaseAccountPresent = @($Inventory.LocalUsers | Where-Object { $_.Name -eq 'cloudbase-init' }).Count -gt 0
+        CloudbaseProfileCount   = @($Inventory.CloudbaseProfiles).Count
+        VendorProcessCount      = @($Inventory.VendorProcesses).Count
+        VendorTaskCount         = @($Inventory.VendorTasks).Count
+        UnknownCertificateCandidateCount = @($Inventory.CertificateCandidates | Where-Object {
+            @($Manifest.KnownCertificates.Thumbprint) -notcontains [string]$_.Thumbprint
+        }).Count
+        FirewallAllowRuleCount  = (@($Inventory.FirewallPrograms | ForEach-Object { [int]$_.Rules }) | Measure-Object -Sum).Sum
+        VendorTcpListenerCount  = @($Inventory.VendorTcpListeners).Count
+        VendorTcpConnectionCount = @($Inventory.VendorTcpConnections).Count
+        VendorUdpEndpointCount  = @($Inventory.VendorUdpEndpoints).Count
+        WmiCommandConsumerCount = @($Inventory.WmiCommandConsumers).Count
+        WmiScriptConsumerCount  = @($Inventory.WmiScriptConsumers).Count
+        WmiBindingCount         = @($Inventory.WmiBindings).Count
+        NonMicrosoftTaskCount   = @($Inventory.NonMicrosoftTasks).Count
+        StartupFileCount        = @($Inventory.StartupFiles).Count
+    }
+}
+
+function Get-CTDiagnosticContextView {
+    param(
+        [PSObject]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest
+    )
+
+    if ($null -eq $Context) {
+        return [PSCustomObject]@{ Bound = $false; Status = 'Stateless'; RebootNeeded = $false; OperationCount = 0; PendingCount = 0; Operations = @(); Issues = @() }
+    }
+    $operations = New-Object Collections.Generic.List[object]
+    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence')
+    $index = 0
+    foreach ($operation in @($Context.Operations) | Select-Object -First 1000) {
+        $index++
+        $safeType = Get-CTDiagnosticEnumValue -Value ([string]$operation.Type) -Allowed $allowedTypes
+        $operations.Add([PSCustomObject]@{
+            Sequence    = $index
+            Type        = $safeType
+            Component   = Get-CTDiagnosticTargetId -Type $safeType -Target ([string]$operation.Target) -Manifest $Manifest
+            Status      = Get-CTDiagnosticEnumValue -Value ([string]$operation.Status) -Allowed @('Pending', 'Completed')
+            Reversible  = [bool]$operation.Reversible
+        })
+    }
+    return [PSCustomObject]@{
+        Bound          = $true
+        Status         = Get-CTDiagnosticEnumValue -Value ([string]$Context.Status) -Allowed @('Running', 'Prepared', 'PendingReboot', 'Applied', 'Failed')
+        RebootNeeded   = [bool]$Context.RebootNeeded
+        OperationCount = @($Context.Operations).Count
+        PendingCount   = @($Context.Operations | Where-Object { $_.Status -eq 'Pending' }).Count
+        Operations     = $operations.ToArray()
+        Issues         = @(Get-CTDiagnosticIssueView -Messages @($Context.Warnings) -Manifest $Manifest)
+    }
+}
+
+function Get-CTDiagnosticResultView {
+    param([object]$Result)
+
+    if ($null -eq $Result) { return [PSCustomObject]@{ Available = $false } }
+    $items = @($Result)
+    if ($items.Count -ne 1) { return [PSCustomObject]@{ Available = $true; ItemCount = $items.Count } }
+    $item = $items[0]
+    $passed = Get-CTPropertyValue -InputObject $item -Name 'Passed'
+    $rebootNeeded = Get-CTPropertyValue -InputObject $item -Name 'RebootNeeded'
+    $warningCount = Get-CTPropertyValue -InputObject $item -Name 'WarningCount'
+    return [PSCustomObject]@{
+        Available     = $true
+        ItemCount     = 1
+        Status        = Get-CTDiagnosticEnumValue -Value ([string](Get-CTPropertyValue -InputObject $item -Name 'Status')) -Allowed @('Running', 'Prepared', 'PendingReboot', 'Applied', 'Failed')
+        Passed        = if ($passed -is [bool]) { [bool]$passed } else { $null }
+        RebootNeeded  = if ($rebootNeeded -is [bool]) { [bool]$rebootNeeded } else { $null }
+        WarningCount  = Get-CTDiagnosticBoundedInteger -Value $warningCount -Minimum 0 -Maximum 100000
+    }
+}
+
+function Get-CTDiagnosticEventView {
+    param([Parameter(Mandatory = $true)][hashtable]$Manifest)
+
+    $events = New-Object Collections.Generic.List[object]
+    $allowedStages = @('Invocation', 'Manifest', 'RunContext', 'Operation', 'Confirmation', 'Preflight', 'NativeCommand', 'Apply', 'Prepare', 'Verification', 'Journal')
+    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence', 'NativeCommand')
+    $index = 0
+    foreach ($event in @($script:DiagnosticEvents) | Select-Object -First 2000) {
+        $index++
+        $type = Get-CTDiagnosticEnumValue -Value ([string](Get-CTPropertyValue -InputObject $event.Data -Name 'Type')) -Allowed $allowedTypes
+        if ($type -eq 'Unavailable') { $type = $null }
+        $target = [string](Get-CTPropertyValue -InputObject $event.Data -Name 'Target')
+        $exitCode = Get-CTPropertyValue -InputObject $event.Data -Name 'ExitCode'
+        $durationMs = Get-CTPropertyValue -InputObject $event.Data -Name 'DurationMs'
+        $pendingCount = Get-CTPropertyValue -InputObject $event.Data -Name 'PendingCount'
+        $rebootNeeded = Get-CTPropertyValue -InputObject $event.Data -Name 'RebootNeeded'
+        $events.Add([PSCustomObject]@{
+            Sequence  = $index
+            Level     = Get-CTDiagnosticEnumValue -Value ([string]$event.Level) -Allowed @('Info', 'Warning', 'Error')
+            Stage     = Get-CTDiagnosticEnumValue -Value ([string]$event.Stage) -Allowed $allowedStages
+            Code      = Get-CTDiagnosticCode -Message ([string]$event.Message)
+            Type      = $type
+            Component = if ([string]::IsNullOrWhiteSpace($type)) { 'Unclassified' } else { Get-CTDiagnosticTargetId -Type $type -Target $target -Manifest $Manifest }
+            ExitCode  = Get-CTDiagnosticBoundedInteger -Value $exitCode -Minimum -1 -Maximum 65535
+            DurationMs = Get-CTDiagnosticBoundedInteger -Value $durationMs -Minimum 0 -Maximum ([int]::MaxValue)
+            Status     = Get-CTDiagnosticEnumValue -Value ([string](Get-CTPropertyValue -InputObject $event.Data -Name 'Status')) -Allowed @('Pending', 'Completed', 'Running', 'Prepared', 'PendingReboot', 'Applied', 'Failed')
+            RebootNeeded = if ($rebootNeeded -is [bool]) { [bool]$rebootNeeded } else { $null }
+            PendingCount = Get-CTDiagnosticBoundedInteger -Value $pendingCount -Minimum 0 -Maximum 100000
+        })
+    }
+    return $events.ToArray()
+}
+
+function Write-CTNewUtf8File {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory = $true)][bool]$MachineScope
+    )
+
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $writer = New-Object IO.StreamWriter($stream, $encoding)
+        try {
+            $writer.Write($Content)
+            $writer.Flush()
+        }
+        finally { $writer.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    Set-CTDiagnosticFileAcl -Path $Path -MachineScope $MachineScope
+}
+
+function Test-CTDiagnosticTextSafe {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    if ([Text.Encoding]::UTF8.GetByteCount($Text) -gt 2097152) { throw 'DiagnosticSizeLimitExceeded' }
+    $forbiddenLiterals = @(
+        'state.clixml', 'before.json', 'after.json', 'platform-before.json',
+        '.reg', '.cer', '.wfw', 'quarantine\', 'CommandLine', 'ScriptText',
+        'SignerSubject', 'Thumbprint', 'RemoteAddress', 'LocalAddress', 'MacAddress',
+        'ServerAddresses', 'ProfilePath', 'MachineSid', 'AccountSid', 'ProfileSid'
+    )
+    foreach ($literal in $forbiddenLiterals) {
+        if ($Text.IndexOf($literal, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw 'DiagnosticSanitizationFailed' }
+    }
+    foreach ($literal in @([string]$env:USERNAME, [string]$env:COMPUTERNAME, [string]([Environment]::GetFolderPath('UserProfile')))) {
+        if (-not [string]::IsNullOrWhiteSpace($literal) -and $literal.Length -ge 3 -and
+            $Text.IndexOf($literal, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw 'DiagnosticSanitizationFailed'
+        }
+    }
+    foreach ($pattern in @(
+        '(?i)S-1-5-21-(?:[0-9]+-){2,}[0-9]+',
+        '(?i)[A-Z]:\\Users\\',
+        '(?i)\\\\[^\\\s]+\\',
+        '(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])',
+        '(?i)(?:[0-9a-f]{1,4}:){2,}[0-9a-f:]{1,}',
+        '(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}',
+        '(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}',
+        '(?i)(?:password|passwd|pwd|token|secret|cookie|authorization)\s*[:=]'
+    )) {
+        if ($Text -match $pattern) { throw 'DiagnosticSanitizationFailed' }
+    }
+    return $true
+}
+
+function Set-CTDiagnosticDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$MachineScope
+    )
+
+    if (-not $MachineScope) { throw 'UnsafeDiagnosticOutputPath' }
+    Set-CTRunDirectoryAcl -Path $Path
+}
+
+function Set-CTDiagnosticFileAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$MachineScope
+    )
+
+    if (-not $MachineScope) { throw 'UnsafeDiagnosticOutputPath' }
+    Set-CTRunFileAcl -Path $Path
+}
+
+function Initialize-CTDiagnosticOutputRoot {
+    param([Parameter(Mandatory = $true)][string]$Mode)
+
+    if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or
+        $PSVersionTable.PSVersion.Minor -ne 1 -or -not [Environment]::Is64BitProcess) {
+        throw 'DiagnosticRequiresWindowsPowerShell51x64'
+    }
+
+    if (-not (Test-CTIsAdministrator)) { throw 'DiagnosticRequiresElevation' }
+    $machineScope = $true
+    $knownFolderBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $expectedBase = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) 'ProgramData'
+    if ([string]::IsNullOrWhiteSpace($knownFolderBase) -or
+        -not (ConvertTo-CTFullPath -Path $knownFolderBase).Equals((ConvertTo-CTFullPath -Path $expectedBase), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'UnsafeDiagnosticOutputPath'
+    }
+    $base = $knownFolderBase
+    if ([string]::IsNullOrWhiteSpace($base)) { throw 'UnsafeDiagnosticOutputPath' }
+    $base = ConvertTo-CTFullPath -Path $base
+    $root = ConvertTo-CTFullPath -Path (Join-Path $base 'CTyunTrim\Diagnostics')
+    if ($root -notmatch '^[A-Za-z]:\\' -or [WildcardPattern]::ContainsWildcardCharacters($root) -or
+        $root.StartsWith('\\', [StringComparison]::Ordinal) -or $root.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        throw 'UnsafeDiagnosticOutputPath'
+    }
+    if (Test-CTPathHasReparsePoint -Path $root) { throw 'UnsafeDiagnosticOutputPath' }
+
+    if (-not (Test-Path -LiteralPath $root)) {
+        $missingDirectories = New-Object Collections.Generic.List[string]
+        $candidate = $root
+        while (-not (Test-Path -LiteralPath $candidate)) {
+            $missingDirectories.Add($candidate)
+            $candidate = Split-Path -Parent $candidate
+            if ([string]::IsNullOrWhiteSpace($candidate)) { throw 'UnsafeDiagnosticOutputPath' }
+        }
+        for ($index = $missingDirectories.Count - 1; $index -ge 0; $index--) {
+            New-Item -ItemType Directory -Path $missingDirectories[$index] -ErrorAction Stop | Out-Null
+            Set-CTDiagnosticDirectoryAcl -Path $missingDirectories[$index] -MachineScope $machineScope
+        }
+    }
+    elseif (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw 'UnsafeDiagnosticOutputPath'
+    }
+    if (-not (Test-CTSecureSourcePath -Path $root)) { throw 'UnsafeDiagnosticOutputPath' }
+    return [PSCustomObject]@{
+        Root         = $root
+        MachineScope = $machineScope
+        DisplayRoot  = '[CommonApplicationData]\CTyunTrim\Diagnostics'
+    }
+}
+
+function Test-CTDiagnosticArchiveSafe {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or (Test-CTPathHasReparsePoint -Path $Path)) { throw 'DiagnosticArchiveValidationFailed' }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $expectedNames = @('environment.json', 'events.jsonl', 'README.txt', 'summary.json')
+        $actualNames = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+        if (($actualNames -join "`n") -cne (($expectedNames | Sort-Object) -join "`n") -or
+            @($zip.Entries | Group-Object { $_.FullName.ToUpperInvariant() } | Where-Object { $_.Count -gt 1 }).Count -gt 0 -or
+            ($zip.Entries | Measure-Object -Property Length -Sum).Sum -gt 2097152) {
+            throw 'DiagnosticArchiveValidationFailed'
+        }
+        $allText = New-Object Text.StringBuilder
+        foreach ($entry in $zip.Entries) {
+            if ($entry.Length -gt 1048576) { throw 'DiagnosticArchiveValidationFailed' }
+            $stream = $entry.Open()
+            $reader = New-Object IO.StreamReader($stream, (New-Object Text.UTF8Encoding($false)))
+            try { $content = $reader.ReadToEnd() } finally { $reader.Dispose(); $stream.Dispose() }
+            [void]$allText.AppendLine($content)
+            if ($entry.FullName -in @('summary.json', 'environment.json')) {
+                try { [void]($content | ConvertFrom-Json -ErrorAction Stop) } catch { throw 'DiagnosticArchiveValidationFailed' }
+            }
+            elseif ($entry.FullName -eq 'events.jsonl') {
+                foreach ($line in @($content -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+                    try { [void]($line | ConvertFrom-Json -ErrorAction Stop) } catch { throw 'DiagnosticArchiveValidationFailed' }
+                }
+            }
+        }
+        [void](Test-CTDiagnosticTextSafe -Text $allText.ToString())
+    }
+    finally { $zip.Dispose() }
+    return $true
+}
+
+function New-CTyunTrimDiagnosticBundle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [string]$RunId,
+        [object]$Result,
+        [bool]$PrimarySucceeded = $true,
+        [string]$FailureMessage
+    )
+
+    $output = Initialize-CTDiagnosticOutputRoot -Mode $Mode
+    $outputRoot = [string]$output.Root
+    $machineScope = [bool]$output.MachineScope
+    $backupRootFull = ConvertTo-CTFullPath -Path $BackupRoot
+    if ($outputRoot.Equals($backupRootFull, [StringComparison]::OrdinalIgnoreCase) -or
+        $outputRoot.StartsWith($backupRootFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $backupRootFull.StartsWith($outputRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'UnsafeDiagnosticOutputPath'
+    }
+    foreach ($protectedRoot in $script:ApprovedRoots.Values) {
+        $protectedRootFull = ConvertTo-CTFullPath -Path ([string]$protectedRoot)
+        if ($outputRoot.Equals($protectedRootFull, [StringComparison]::OrdinalIgnoreCase) -or
+            $outputRoot.StartsWith($protectedRootFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $protectedRootFull.StartsWith($outputRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'UnsafeDiagnosticOutputPath'
+        }
+    }
+    $suffix = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 12))
+    $stagingRoot = ConvertTo-CTFullPath -Path (Join-Path $outputRoot ('.staging-' + $suffix))
+    $archivePath = ConvertTo-CTFullPath -Path (Join-Path $outputRoot ("CTyunTrim-Diagnostic-$suffix.zip"))
+    $temporaryArchive = ConvertTo-CTFullPath -Path (Join-Path $outputRoot ('.diagnostic-' + $suffix + '.tmp.zip'))
+    $checksumPath = "$archivePath.sha256"
+    if (-not (Test-CTPathWithinRoot -Path $stagingRoot -Root $outputRoot) -or
+        -not (Test-CTPathWithinRoot -Path $archivePath -Root $outputRoot) -or
+        -not (Test-CTPathWithinRoot -Path $temporaryArchive -Root $outputRoot) -or
+        -not (Test-CTPathWithinRoot -Path $checksumPath -Root $outputRoot)) {
+        throw 'UnsafeDiagnosticOutputPath'
+    }
+    foreach ($path in @($stagingRoot, $archivePath, $temporaryArchive, $checksumPath)) {
+        if (Test-Path -LiteralPath $path) { throw 'DiagnosticOutputCollision' }
+        if (Test-CTPathHasReparsePoint -Path $path) { throw 'UnsafeDiagnosticOutputPath' }
+    }
+
+    $createdStaging = $false
+    $completed = $false
+    try {
+        New-Item -ItemType Directory -Path $stagingRoot -ErrorAction Stop | Out-Null
+        $createdStaging = $true
+        Set-CTDiagnosticDirectoryAcl -Path $stagingRoot -MachineScope $machineScope
+
+        $validation = Test-CTyunTrimManifest -ManifestPath $ManifestPath
+        $manifest = if ($validation.Valid) { $validation.Manifest } else { $null }
+        $context = $null
+        $contextState = 'Stateless'
+        $effectiveRunId = if (-not [string]::IsNullOrWhiteSpace($RunId)) { $RunId } else { [string]$script:LastRunId }
+        if ($validation.Valid -and -not [string]::IsNullOrWhiteSpace($effectiveRunId)) {
+            try {
+                $context = Get-CTRunContext -BackupRoot $BackupRoot -RunId $effectiveRunId
+                $contextState = 'Bound'
+            }
+            catch { $contextState = 'Untrusted' }
+        }
+
+        $inventoryView = $null
+        $inventoryStatus = 'Unavailable'
+        $planCounts = @()
+        if ($validation.Valid) {
+            try {
+                $inventory = Get-CTyunTrimInventory -ManifestPath $ManifestPath
+                $inventoryView = Get-CTDiagnosticInventoryView -Inventory $inventory -Manifest $manifest
+                $inventoryStatus = 'Available'
+            }
+            catch { $inventoryStatus = 'QueryFailed' }
+            $plan = @(Get-CTPlan -Manifest $manifest)
+            $planCounts = @($plan | Group-Object -Property Type | ForEach-Object {
+                [PSCustomObject]@{ Type = [string]$_.Name; Count = [int]$_.Count }
+            })
+        }
+
+        $preflightView = if ($null -ne $script:LastPreflightResult -and $validation.Valid) {
+            [PSCustomObject]@{
+                Ran          = $true
+                Passed       = [bool]$script:LastPreflightResult.Passed
+                ErrorCount   = @($script:LastPreflightResult.Errors).Count
+                WarningCount = @($script:LastPreflightResult.Warnings).Count
+                Errors       = @(Get-CTDiagnosticIssueView -Messages @($script:LastPreflightResult.Errors) -Manifest $manifest)
+                Warnings     = @(Get-CTDiagnosticIssueView -Messages @($script:LastPreflightResult.Warnings) -Manifest $manifest)
+            }
+        }
+        else { [PSCustomObject]@{ Ran = $false; Passed = $null; ErrorCount = 0; WarningCount = 0; Errors = @(); Warnings = @() } }
+
+        $contextView = if ($validation.Valid) { Get-CTDiagnosticContextView -Context $context -Manifest $manifest } else { [PSCustomObject]@{ Bound = $false; Status = 'Stateless'; RebootNeeded = $false; OperationCount = 0; PendingCount = 0; Operations = @(); Issues = @() } }
+        $eventView = if ($validation.Valid) { @(Get-CTDiagnosticEventView -Manifest $manifest) } else { @() }
+        $summary = [ordered]@{
+            SchemaVersion    = '1.0'
+            ToolVersion      = $script:CTyunTrimVersion
+            InvocationId     = if ([string]$script:DiagnosticInvocationId -match '^[0-9a-f]{32}$') { [string]$script:DiagnosticInvocationId } else { 'Unavailable' }
+            Mode             = $Mode
+            PrimarySucceeded = $PrimarySucceeded
+            FailureCode      = if ($PrimarySucceeded) { 'None' } else { Get-CTDiagnosticCode -Message $FailureMessage }
+            ManifestValid    = [bool]$validation.Valid
+            ManifestHashMatches = [bool]($validation.Valid -and [string]$validation.ManifestHash -eq $script:ApprovedManifestSha256)
+            InventoryStatus  = $inventoryStatus
+            ContextState     = $contextState
+            Result           = Get-CTDiagnosticResultView -Result $Result
+            Preflight        = $preflightView
+            Run              = $contextView
+            Components       = $inventoryView
+            PlanCounts       = @($planCounts)
+            EventCount       = @($eventView).Count
+        }
+        $os = Get-CTOperatingSystem
+        $environment = [ordered]@{
+            SchemaVersion      = '1.0'
+            ToolVersion        = $script:CTyunTrimVersion
+            PowerShellMajor    = [int]$PSVersionTable.PSVersion.Major
+            PowerShellMinor    = [int]$PSVersionTable.PSVersion.Minor
+            PowerShellBuild    = [int]$PSVersionTable.PSVersion.Build
+            PowerShellRevision = [int]$PSVersionTable.PSVersion.Revision
+            PowerShellEdition  = [string]$PSVersionTable.PSEdition
+            Process64Bit       = [bool][Environment]::Is64BitProcess
+            OperatingSystemVersion = if ([string]$os.Version -match '^[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?$') { [string]$os.Version } else { 'Unknown' }
+            OperatingSystemBuild   = [int]$os.Build
+            OperatingSystemArchitecture = Get-CTDiagnosticEnumValue -Value ([string]$os.Architecture) -Allowed @('64-bit', '32-bit')
+            SupportedBuild     = if ($validation.Valid) { @($manifest.SupportedBuilds) -contains [int]$os.Build } else { $false }
+        }
+        $readme = @'
+CTyunTrim sanitized diagnostic bundle
+
+This archive is generated only when -Diagnostic is explicitly requested.
+It contains allowlisted component states, counts, stable reason codes, and no raw run backups.
+It intentionally excludes command lines, registry values, task arguments, scripts, usernames,
+SIDs, network addresses, certificate identities, quarantine contents, and credentials.
+Review the JSON before sharing it.
+'@
+
+        $summaryText = $summary | ConvertTo-Json -Depth 12
+        $environmentText = $environment | ConvertTo-Json -Depth 6
+        $eventLines = @($eventView | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 5 })
+        $eventsText = $eventLines -join "`n"
+        $combinedText = "$summaryText`n$environmentText`n$eventsText`n$readme"
+        [void](Test-CTDiagnosticTextSafe -Text $combinedText)
+
+        $summaryPath = Join-Path $stagingRoot 'summary.json'
+        $environmentPath = Join-Path $stagingRoot 'environment.json'
+        $eventsPath = Join-Path $stagingRoot 'events.jsonl'
+        $readmePath = Join-Path $stagingRoot 'README.txt'
+        Write-CTNewUtf8File -Path $summaryPath -Content $summaryText -MachineScope $machineScope
+        Write-CTNewUtf8File -Path $environmentPath -Content $environmentText -MachineScope $machineScope
+        Write-CTNewUtf8File -Path $eventsPath -Content $eventsText -MachineScope $machineScope
+        Write-CTNewUtf8File -Path $readmePath -Content $readme -MachineScope $machineScope
+
+        Compress-Archive -LiteralPath @($summaryPath, $environmentPath, $eventsPath, $readmePath) -DestinationPath $temporaryArchive -CompressionLevel Optimal -ErrorAction Stop
+        Set-CTDiagnosticFileAcl -Path $temporaryArchive -MachineScope $machineScope
+        [void](Test-CTDiagnosticArchiveSafe -Path $temporaryArchive)
+
+        Move-Item -LiteralPath $temporaryArchive -Destination $archivePath -ErrorAction Stop
+        [void](Test-CTDiagnosticArchiveSafe -Path $archivePath)
+        $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        Write-CTNewUtf8File -Path $checksumPath -Content "$archiveHash  $([IO.Path]::GetFileName($archivePath))`r`n" -MachineScope $machineScope
+        $completed = $true
+        return [PSCustomObject]@{
+            Succeeded       = $true
+            BundlePath      = (Join-Path ([string]$output.DisplayRoot) ([IO.Path]::GetFileName($archivePath)))
+            SHA256          = $archiveHash
+            Bytes           = (Get-Item -LiteralPath $archivePath).Length
+            EntryCount      = 4
+            RunBound        = ($null -ne $context)
+            SanitizerSchema = '1.0'
+        }
+    }
+    finally {
+        if ($createdStaging -and (Test-Path -LiteralPath $stagingRoot) -and
+            (Test-CTPathWithinRoot -Path $stagingRoot -Root $outputRoot) -and
+            -not (Test-CTPathHasReparsePoint -Path $stagingRoot)) {
+            Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($temporary in @($temporaryArchive)) {
+            if ((Test-Path -LiteralPath $temporary) -and (Test-CTPathWithinRoot -Path $temporary -Root $outputRoot) -and
+                -not (Test-CTPathHasReparsePoint -Path $temporary)) {
+                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $completed) {
+            foreach ($finalOutput in @($checksumPath, $archivePath)) {
+                if ((Test-Path -LiteralPath $finalOutput) -and (Test-CTPathWithinRoot -Path $finalOutput -Root $outputRoot) -and
+                    -not (Test-CTPathHasReparsePoint -Path $finalOutput)) {
+                    Remove-Item -LiteralPath $finalOutput -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+}
+
+function Start-CTyunTrimDiagnosticCapture {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')][string]$Mode)
+
+    Initialize-CTDiagnosticState -Enabled $true -Mode $Mode
+    return [PSCustomObject]@{
+        InvocationId = [string]$script:DiagnosticInvocationId
+        Mode         = $Mode
+        Enabled      = $true
+    }
+}
+
+function Stop-CTyunTrimDiagnosticCapture {
+    [CmdletBinding()]
+    param()
+
+    $script:DiagnosticEnabled = $false
+    $script:DiagnosticEvents = New-Object Collections.ArrayList
+    $script:LastPreflightResult = $null
+    $script:LastRunId = $null
+    $script:DiagnosticInvocationId = $null
+    $script:DiagnosticMode = $null
+}
+
 function Invoke-CTNativeCommand {
     [CmdletBinding()]
     param(
@@ -1032,6 +1770,9 @@ function Invoke-CTNativeCommand {
         [switch]$IgnoreFailure
     )
 
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $exitCode = -1
+    $output = @()
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -1040,6 +1781,10 @@ function Invoke-CTNativeCommand {
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        $stopwatch.Stop()
+    }
+    Add-CTDiagnosticEvent -Level $(if ($SuccessExitCodes -contains $exitCode) { 'Info' } else { 'Error' }) -Stage 'NativeCommand' -Message $(if ($SuccessExitCodes -contains $exitCode) { 'Native command completed.' } else { 'Native command failed.' }) -Data @{
+        Type = 'NativeCommand'; Target = [IO.Path]::GetFileName($FilePath); ExitCode = [int]$exitCode; DurationMs = [int][Math]::Min([long]$stopwatch.ElapsedMilliseconds, [long][int]::MaxValue)
     }
     if (($SuccessExitCodes -notcontains $exitCode) -and -not $IgnoreFailure) {
         throw "$FilePath exited with code $exitCode. $($output -join [Environment]::NewLine)"
@@ -1141,6 +1886,8 @@ function New-CTRunContext {
         throw 'Could not determine the local machine SID; no run state was accepted.'
     }
     Save-CTRunContext -Context $context
+    $script:LastRunId = $runId
+    Add-CTDiagnosticEvent -Stage 'RunContext' -Message 'Created protected run context.' -Data @{ RunId = $runId }
     return $context
 }
 
@@ -1208,6 +1955,8 @@ function Get-CTRunContext {
     foreach ($warning in @($context.Warnings)) { [void]$warnings.Add([string]$warning) }
     $context.Operations = $operations
     $context.Warnings = $warnings
+    $script:LastRunId = [string]$context.RunId
+    Add-CTDiagnosticEvent -Stage 'RunContext' -Message 'Loaded protected run context.' -Data @{ RunId = [string]$context.RunId; Status = [string]$context.Status }
     return $context
 }
 
@@ -1263,6 +2012,7 @@ function Add-CTOperation {
     }
     [void]$Context.Operations.Add($operation)
     Save-CTRunContext -Context $Context
+    Add-CTDiagnosticEvent -Stage 'Operation' -Message 'Recorded completed operation.' -Data @{ Type = $Type; Target = $Target; Status = 'Completed' }
 }
 
 function Get-CTPendingOperation {
@@ -1300,6 +2050,7 @@ function Start-CTOperation {
                 throw "Pending journal data changed for $Type / $Target / $propertyName."
             }
         }
+        Add-CTDiagnosticEvent -Stage 'Operation' -Message 'Reused pending write-ahead operation.' -Data @{ Type = $Type; Target = $Target; Status = 'Pending' }
         return [string]$existingPending.Id
     }
 
@@ -1316,6 +2067,7 @@ function Start-CTOperation {
     }
     [void]$Context.Operations.Add($operation)
     Save-CTRunContext -Context $Context
+    Add-CTDiagnosticEvent -Stage 'Operation' -Message 'Started write-ahead operation.' -Data @{ Type = $Type; Target = $Target; Status = 'Pending' }
     return $id
 }
 
@@ -1330,6 +2082,7 @@ function Complete-CTOperation {
     $operation.Status = 'Completed'
     $operation.CompletedAt = (Get-Date).ToString('o')
     Save-CTRunContext -Context $Context
+    Add-CTDiagnosticEvent -Stage 'Operation' -Message 'Completed write-ahead operation.' -Data @{ Type = [string]$operation.Type; Target = [string]$operation.Target; Status = 'Completed' }
 }
 
 function Resolve-CTPendingOperations {
@@ -1339,6 +2092,7 @@ function Resolve-CTPendingOperations {
     )
 
     $pendingOperations = @($Context.Operations | Where-Object { $_.Status -eq 'Pending' })
+    Add-CTDiagnosticEvent -Stage 'Journal' -Message 'Started pending-operation reconciliation.' -Data @{ PendingCount = $pendingOperations.Count }
     $taskSnapshot = if (@($pendingOperations | Where-Object { $_.Type -eq 'ScheduledTask' }).Count -gt 0) {
         @(Get-ScheduledTask -ErrorAction Stop)
     }
@@ -1434,6 +2188,9 @@ function Resolve-CTPendingOperations {
             Complete-CTOperation -Context $Context -Id ([string]$operation.Id)
         }
     }
+    Add-CTDiagnosticEvent -Stage 'Journal' -Message 'Completed pending-operation reconciliation.' -Data @{
+        PendingCount = @($Context.Operations | Where-Object { $_.Status -eq 'Pending' }).Count
+    }
 }
 
 function Add-CTWarning {
@@ -1447,7 +2204,25 @@ function Add-CTWarning {
 
     [void]$Context.Warnings.Add($Message)
     Save-CTRunContext -Context $Context
+    Add-CTDiagnosticEvent -Level 'Warning' -Stage 'Operation' -Message $Message
     Write-Warning $Message
+}
+
+function Save-CTFailedRunContextSafe {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    try {
+        $Context.Status = 'Failed'
+        $Context.CompletedAt = (Get-Date).ToString('o')
+        [void]$Context.Warnings.Add($FailureMessage)
+        Save-CTRunContext -Context $Context
+    }
+    catch {
+        Add-CTDiagnosticEvent -Level 'Error' -Stage 'RunContext' -Message 'Failed to persist failure state.'
+    }
 }
 
 function Confirm-CTRequiredOperation {
@@ -1458,8 +2233,10 @@ function Confirm-CTRequiredOperation {
     )
 
     if (-not $Caller.ShouldProcess($Target, $Action)) {
+        Add-CTDiagnosticEvent -Level 'Error' -Stage 'Confirmation' -Message 'Required operation was declined.' -Data @{ Action = $Action; Target = $Target }
         throw (New-Object System.OperationCanceledException("Required operation was declined; the transaction stopped before dependent changes: $Action / $Target"))
     }
+    Add-CTDiagnosticEvent -Stage 'Confirmation' -Message 'Required operation was confirmed.' -Data @{ Action = $Action; Target = $Target }
     return $true
 }
 
@@ -3569,11 +4346,18 @@ function Test-CTApplyPreflight {
         }
     }
 
-    [PSCustomObject]@{
+    $result = [PSCustomObject]@{
         Passed   = ($errors.Count -eq 0)
         Errors   = $errors.ToArray()
         Warnings = $warnings.ToArray()
     }
+    $script:LastPreflightResult = $result
+    Add-CTDiagnosticEvent -Level $(if ($result.Passed) { 'Info' } else { 'Error' }) -Stage 'Preflight' -Message $(if ($result.Passed) { 'Preflight passed.' } else { 'Preflight failed.' }) -Data @{
+        Passed       = [bool]$result.Passed
+        ErrorCount   = @($result.Errors).Count
+        WarningCount = @($result.Warnings).Count
+    }
+    return $result
 }
 
 function Invoke-CTApply {
@@ -3595,6 +4379,7 @@ function Invoke-CTApply {
         [Management.Automation.PSCmdlet]$Caller
     )
 
+    Add-CTDiagnosticEvent -Stage 'Apply' -Message 'Apply started.'
     $os = Get-CTOperatingSystem
     if ($Manifest.SupportedBuilds -notcontains $os.Build) {
         throw "Unsupported Windows build $($os.Build). Supported builds: $($Manifest.SupportedBuilds -join ', '). Apply refused."
@@ -3666,6 +4451,7 @@ function Invoke-CTApply {
             $context.Status = 'PendingReboot'
             $context.CompletedAt = (Get-Date).ToString('o')
             Save-CTRunContext -Context $context
+            Add-CTDiagnosticEvent -Level 'Warning' -Stage 'Apply' -Message 'Apply requires reboot.' -Data @{ Status = 'PendingReboot' }
             return [PSCustomObject]@{
                 RunId        = $context.RunId
                 Status       = $context.Status
@@ -3690,6 +4476,7 @@ function Invoke-CTApply {
             $context.Status = 'PendingReboot'
             $context.CompletedAt = (Get-Date).ToString('o')
             Save-CTRunContext -Context $context
+            Add-CTDiagnosticEvent -Level 'Warning' -Stage 'Apply' -Message 'Apply requires reboot.' -Data @{ Status = 'PendingReboot' }
             return [PSCustomObject]@{
                 RunId        = $context.RunId
                 Status       = $context.Status
@@ -3729,6 +4516,7 @@ function Invoke-CTApply {
         }
         $context.CompletedAt = (Get-Date).ToString('o')
         Save-CTRunContext -Context $context
+        Add-CTDiagnosticEvent -Stage 'Apply' -Message 'Apply completed.' -Data @{ Status = [string]$context.Status; RebootNeeded = [bool]$context.RebootNeeded }
 
         return [PSCustomObject]@{
             RunId         = $context.RunId
@@ -3741,10 +4529,8 @@ function Invoke-CTApply {
         }
     }
     catch {
-        $context.Status = 'Failed'
-        $context.CompletedAt = (Get-Date).ToString('o')
-        [void]$context.Warnings.Add($_.Exception.Message)
-        Save-CTRunContext -Context $context
+        Save-CTFailedRunContextSafe -Context $context -FailureMessage $_.Exception.Message
+        Add-CTDiagnosticEvent -Level 'Error' -Stage 'Apply' -Message 'Apply failed.'
         throw
     }
 }
@@ -3766,6 +4552,7 @@ function Invoke-CTPrepare {
         [Management.Automation.PSCmdlet]$Caller
     )
 
+    Add-CTDiagnosticEvent -Stage 'Prepare' -Message 'Prepare started.'
     $os = Get-CTOperatingSystem
     if ($Manifest.SupportedBuilds -notcontains $os.Build) {
         throw "Unsupported Windows build $($os.Build). Supported builds: $($Manifest.SupportedBuilds -join ', '). Prepare refused."
@@ -3799,6 +4586,7 @@ function Invoke-CTPrepare {
         $context.Status = 'Prepared'
         $context.CompletedAt = (Get-Date).ToString('o')
         Save-CTRunContext -Context $context
+        Add-CTDiagnosticEvent -Stage 'Prepare' -Message 'Prepare completed.' -Data @{ Status = 'Prepared' }
 
         return [PSCustomObject]@{
             RunId       = $context.RunId
@@ -3808,10 +4596,8 @@ function Invoke-CTPrepare {
         }
     }
     catch {
-        $context.Status = 'Failed'
-        $context.CompletedAt = (Get-Date).ToString('o')
-        [void]$context.Warnings.Add($_.Exception.Message)
-        Save-CTRunContext -Context $context
+        Save-CTFailedRunContextSafe -Context $context -FailureMessage $_.Exception.Message
+        Add-CTDiagnosticEvent -Level 'Error' -Stage 'Prepare' -Message 'Prepare failed.'
         throw
     }
 }
@@ -3838,26 +4624,32 @@ function Invoke-CTyunTrim {
         [switch]$Json
     )
 
+    if (-not $script:DiagnosticEnabled) { Initialize-CTDiagnosticState -Enabled $false -Mode $Mode }
     $manifestValidation = Test-CTyunTrimManifest -ManifestPath $ManifestPath
     if (-not $manifestValidation.Valid) {
+        Add-CTDiagnosticEvent -Level 'Error' -Stage 'Manifest' -Message 'Manifest validation failed.' -Data @{ ErrorCount = @($manifestValidation.Errors).Count }
         throw "Manifest validation failed: $($manifestValidation.Errors -join '; ')"
     }
     $manifest = $manifestValidation.Manifest
+    Add-CTDiagnosticEvent -Stage 'Manifest' -Message 'Manifest validation passed.'
 
     if ($Mode -eq 'Audit') {
         $result = Get-CTyunTrimInventory -ManifestPath $ManifestPath
+        Add-CTDiagnosticEvent -Stage 'Invocation' -Message 'Audit completed.'
         if ($Json) { return ($result | ConvertTo-Json -Depth 10) }
         return $result
     }
 
     if ($Mode -eq 'Plan' -or ($Mode -eq 'Apply' -and $WhatIfPreference)) {
         $result = Get-CTPlan -Manifest $manifest
+        Add-CTDiagnosticEvent -Stage 'Invocation' -Message 'Plan completed.' -Data @{ ActionCount = @($result).Count }
         if ($Json) { return ($result | ConvertTo-Json -Depth 6) }
         return $result
     }
 
     if ($Mode -eq 'Prepare' -and $WhatIfPreference) {
         $result = @(Get-CTPlan -Manifest $manifest | Where-Object { $_.Type -in @('ExecutionGuard', 'ScheduledTask', 'ProcessStop', 'LocalPolicy') })
+        Add-CTDiagnosticEvent -Stage 'Invocation' -Message 'Prepare preview completed.' -Data @{ ActionCount = @($result).Count }
         if ($Json) { return ($result | ConvertTo-Json -Depth 6) }
         return $result
     }
@@ -3873,6 +4665,9 @@ function Invoke-CTyunTrim {
             $verificationManifestPath = [string]$verificationContext.ManifestPath
         }
         $result = Get-CTVerification -Manifest $manifest -ManifestPath $verificationManifestPath -Context $verificationContext
+        Add-CTDiagnosticEvent -Level $(if ($result.Passed) { 'Info' } else { 'Error' }) -Stage 'Verification' -Message $(if ($result.Passed) { 'Verification passed.' } else { 'Verification failed.' }) -Data @{
+            Passed = [bool]$result.Passed; FailureCount = @($result.Failures).Count; WarningCount = @($result.Warnings).Count
+        }
         if ($Json) { return ($result | ConvertTo-Json -Depth 12) }
         return $result
     }
@@ -3908,6 +4703,7 @@ function Invoke-CTyunTrim {
             Restart-Computer -Force
         }
 
+        Add-CTDiagnosticEvent -Stage 'Invocation' -Message 'Destructive workflow returned.' -Data @{ Status = [string](Get-CTPropertyValue -InputObject $result -Name 'Status') }
         if ($Json) { return ($result | ConvertTo-Json -Depth 10) }
         return $result
     }
@@ -3919,4 +4715,4 @@ function Invoke-CTyunTrim {
     }
 }
 
-Export-ModuleMember -Function Get-CTyunTrimInventory, Test-CTyunTrimManifest, Invoke-CTyunTrim
+Export-ModuleMember -Function Get-CTyunTrimInventory, Test-CTyunTrimManifest, Invoke-CTyunTrim, Start-CTyunTrimDiagnosticCapture, Stop-CTyunTrimDiagnosticCapture, New-CTyunTrimDiagnosticBundle

@@ -2,7 +2,7 @@
 
 CTyunTrim does not redistribute Microsoft `LGPO.exe`.
 
-The 0.1.0 trust profile accepts only Microsoft's LGPO v3.0 binary from the Security Compliance Toolkit download:
+The current trust profile accepts only Microsoft's LGPO v3.0 binary from the Security Compliance Toolkit download:
 
 ```text
 LGPO.exe version: 3.0.2004.13001

@@ -25,6 +25,7 @@ Vendor platform vulnerabilities and tests against infrastructure you do not own 
 
 - No runtime telemetry.
 - No silent download or execution of remote code.
+- Diagnostic ZIPs remain local and are rebuilt from a strict field allowlist; raw run artifacts are never copied into them.
 - Release archives should include SHA-256 checksums.
 - Destructive actions require an explicit mode and `-Force`.
 - Unknown environments fail closed.
