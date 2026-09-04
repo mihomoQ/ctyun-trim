@@ -51,7 +51,7 @@ events.jsonl
 README.txt
 ```
 
-`summary.json` contains stable component IDs, Boolean state, counts, preflight reason codes, journal status and a reduced result summary. Core entries include an allowlisted trust mode plus `SecureSource`, `HashMatches`, `SignerPresent`, `SignerMatches` and `TrustSatisfied` states; actual hashes and signer identities remain excluded. `environment.json` contains only tool/runtime and Windows build information. `events.jsonl` contains bounded structured events with stable codes and allowlisted numeric/status fields.
+`summary.json` contains stable component IDs, Boolean state, counts, preflight reason codes, journal status and a reduced result summary. Core entries include an allowlisted trust mode plus `SecureSource`, `HashMatches`, `SignerPresent`, `SignerMatches` and `TrustSatisfied` states; actual hashes and signer identities remain excluded. Cloudbase state includes only exact Profile counts, Loaded/Special/hive-mounted counts and identity-match Booleans, never the SID. `environment.json` contains only tool/runtime and Windows build information. `events.jsonl` contains bounded structured events with stable codes and allowlisted numeric/status fields.
 
 The archive never copies files from the RunId directory. Specifically excluded are:
 

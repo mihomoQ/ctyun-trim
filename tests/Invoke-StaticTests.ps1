@@ -77,7 +77,17 @@ Assert-CT -Condition ($sourceText -notmatch '(?i)Win32_Product') -Message 'Win32
 Assert-CT -Condition ($sourceText -notmatch '(?i)Invoke-Expression') -Message 'Invoke-Expression is forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Start-Transcript') -Message 'Unstructured PowerShell transcripts are forbidden.'
 Assert-CT -Condition ($sourceText -notmatch '(?i)Remove-Item.+System32\\GroupPolicy') -Message 'Deleting the complete GroupPolicy directory is forbidden.'
-Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.3') -Message 'ModuleVersion is not 0.1.3.'
+Assert-CT -Condition (@([regex]::Matches($sourceText, 'Test-CTApplyPreflight[^\r\n]+-Phase Prepare')).Count -eq 2) -Message 'Prepare must use its loaded-profile phase at initial and mutation-boundary preflight.'
+Assert-CT -Condition (@([regex]::Matches($sourceText, 'Test-CTApplyPreflight[^\r\n]+-Phase Apply')).Count -eq 3) -Message 'Initial, resumed and mutation-boundary Apply must explicitly select the strict Apply preflight phase.'
+$profileRemovalPosition = $sourceText.IndexOf("-Action 'Remove orphaned cloudbase-init user profile'", [StringComparison]::Ordinal)
+$accountDisablePosition = $sourceText.IndexOf("-Action 'Disable and remove exact local service account SID'", [StringComparison]::Ordinal)
+$profileProcessBoundaryPosition = $sourceText.IndexOf('$boundaryProcesses = @(Get-CTProcessesByOwnerSid', [StringComparison]::Ordinal)
+$profileDeletePosition = $sourceText.IndexOf('$profile | Remove-CimInstance -ErrorAction Stop', [StringComparison]::Ordinal)
+$accountRemovalPosition = $sourceText.IndexOf('Remove-LocalUser -SID $account.SID -ErrorAction Stop', [StringComparison]::Ordinal)
+Assert-CT -Condition ($accountDisablePosition -ge 0 -and $profileRemovalPosition -gt $accountDisablePosition -and $accountRemovalPosition -gt $profileRemovalPosition) -Message 'Cloudbase identity order must confirm/disable the account, remove the unloaded Profile, then remove the account.'
+Assert-CT -Condition ($profileProcessBoundaryPosition -ge 0 -and $profileDeletePosition -gt $profileProcessBoundaryPosition) -Message 'Cloudbase Profile deletion lacks a final owner-SID process boundary check.'
+Assert-CT -Condition ($sourceText -match 'Disable-LocalUser -SID \$account\.SID -ErrorAction Stop') -Message 'Cloudbase account disable is not fail-closed.'
+Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.4') -Message 'ModuleVersion is not 0.1.4.'
 Assert-CT -Condition ([string]$moduleManifest.PrivateData.PSData.Prerelease -eq 'Diagnostic') -Message 'Module prerelease label is not Diagnostic.'
 Assert-CT -Condition (@($moduleManifest.FunctionsToExport) -contains 'New-CTyunTrimDiagnosticBundle') -Message 'Diagnostic bundle exporter is not declared in the module manifest.'
 $diagnosticResultSafety = & (Get-Module CTyunTrim) {
@@ -91,6 +101,22 @@ $diagnosticResultSafety = & (Get-Module CTyunTrim) {
 }
 Assert-CT -Condition ($diagnosticResultSafety -notmatch 'ULTRA_PRIVATE_CANARY_7F8B2D|CANARY_COUNT|not-a-boolean') -Message 'Diagnostic result projection copied an untrusted scalar.'
 Assert-CT -Condition ($diagnosticResultSafety -match 'Unknown') -Message 'Diagnostic result projection did not map an unknown status to a stable enum.'
+$diagnosticCodes = & (Get-Module CTyunTrim) {
+    [PSCustomObject]@{
+        CloudbaseLoaded = Get-CTDiagnosticCode -Message 'Cloudbase profile is loaded or its user hive is mounted.'
+        DriverLoaded = Get-CTDiagnosticCode -Message 'Driver is currently loaded and may require a reboot.'
+        ContextLoaded = Get-CTDiagnosticCode -Message 'Loaded protected run context.'
+        PreflightFailed = Get-CTDiagnosticCode -Message 'Prepare preflight failed: cloudbase-init profile is loaded or special.'
+        CloudbaseDeferred = Get-CTDiagnosticCode -Message 'Cloudbase profile is loaded only by the approved TaskAgentDetect process.'
+        CurrentCloudbaseIdentity = Get-CTDiagnosticCode -Message 'CTyunTrim is running as the loaded Cloudbase identity.'
+    }
+}
+Assert-CT -Condition ([string]$diagnosticCodes.CloudbaseLoaded -eq 'CloudbaseProfileUnsafe') -Message 'A loaded Cloudbase profile was mislabeled as diagnostic success.'
+Assert-CT -Condition ([string]$diagnosticCodes.DriverLoaded -eq 'RebootRequired') -Message 'A loaded driver warning was mislabeled as diagnostic success.'
+Assert-CT -Condition ([string]$diagnosticCodes.ContextLoaded -eq 'Success') -Message 'The exact successful run-context load event was not retained as success.'
+Assert-CT -Condition ([string]$diagnosticCodes.PreflightFailed -ne 'Success') -Message 'A failed preflight containing the word loaded was mislabeled as success.'
+Assert-CT -Condition ([string]$diagnosticCodes.CloudbaseDeferred -eq 'CloudbaseProfileDeferred') -Message 'The approved loaded Cloudbase Prepare warning has no stable deferred code.'
+Assert-CT -Condition ([string]$diagnosticCodes.CurrentCloudbaseIdentity -eq 'CloudbaseProfileUnsafe') -Message 'Running as the loaded Cloudbase identity was mislabeled as diagnostic success.'
 
 $plan = @(Invoke-CTyunTrim -Mode Plan -ManifestPath $manifestPath)
 Assert-CT -Condition ($plan.Count -gt 20) -Message 'Plan unexpectedly contains too few actions.'
@@ -289,7 +315,7 @@ try {
     $buildThrew = $false
     try { & (Join-Path $root 'build\Build-Release.ps1') -Version '..\..\config' | Out-Null } catch { $buildThrew = $true }
     Assert-CT -Condition $buildThrew -Message 'Release builder accepted a path-traversal version.'
-    foreach ($invalidVersion in @('0.1.3-Diagnostic.', '0.1.3--Diagnostic', '0.1.3-Diagnostic:')) {
+    foreach ($invalidVersion in @('0.1.4-Diagnostic.', '0.1.4--Diagnostic', '0.1.4-Diagnostic:')) {
         $invalidVersionThrew = $false
         try { & (Join-Path $root 'build\Build-Release.ps1') -Version $invalidVersion | Out-Null } catch { $invalidVersionThrew = $true }
         Assert-CT -Condition $invalidVersionThrew -Message "Release builder accepted an unsafe prerelease version: $invalidVersion"

@@ -151,6 +151,9 @@ function Test-CTDiagnosticProjectionCanaries {
     }
     Assert-CTDiagnostic -Condition ($safeViewJson -match 'PinnedHashAndSigner') -Message 'Diagnostic inventory omitted the allowlisted pinned trust mode.'
     Assert-CTDiagnostic -Condition ($safeViewJson -match 'TrustSatisfied') -Message 'Diagnostic inventory omitted the trust decision Boolean.'
+    foreach ($field in @('CloudbaseProfileLoadedCount', 'CloudbaseProfileSpecialCount', 'CloudbaseProfileHiveMountedCount', 'CloudbaseUnexpectedProfileCount', 'CloudbaseAccountProfileIdentityMatches', 'CloudbaseCurrentIdentityMatches')) {
+        Assert-CTDiagnostic -Condition ($safeViewJson -match [regex]::Escape($field)) -Message "Diagnostic inventory omitted the safe Cloudbase field: $field"
+    }
 
     $otherViewsJson = & $Module {
         param($ManifestPath, $Canaries)

@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.3-Diagnostic'
+$script:CTyunTrimVersion = '0.1.4-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -1147,13 +1147,15 @@ function Get-CTyunTrimInventory {
 
     $localUsers = Get-LocalUser -ErrorAction SilentlyContinue |
         Select-Object Name, Enabled, @{Name = 'SID'; Expression = { [string]$_.SID } }, LastLogon
+    $cloudbaseInventoryAccount = @($localUsers | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
+    $cloudbaseInventorySid = if ($null -ne $cloudbaseInventoryAccount) { [string]$cloudbaseInventoryAccount.SID } else { $null }
 
     $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
     $localAdministrators = Get-LocalGroupMember -SID $administratorsSid -ErrorAction SilentlyContinue |
         Select-Object Name, ObjectClass, PrincipalSource, @{Name = 'SID'; Expression = { [string]$_.SID } }
 
     $cloudbaseProfiles = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPath -like '*cloudbase-init*' } |
+        Where-Object { $_.LocalPath -like '*cloudbase-init*' -or (-not [string]::IsNullOrWhiteSpace($cloudbaseInventorySid) -and [string]$_.SID -eq $cloudbaseInventorySid) } |
         Select-Object LocalPath, SID, Loaded, Special
 
     $listeners = foreach ($connection in Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue) {
@@ -1298,7 +1300,10 @@ function Get-CTDiagnosticCode {
     param([string]$Message)
 
     if ([string]::IsNullOrWhiteSpace($Message)) { return 'None' }
-    if ($Message -match '(?i)\b(started|passed|completed|created|loaded|confirmed|recorded|reused|returned)\b') { return 'Success' }
+    if ($Message -match '(?i)Cloudbase profile is loaded only by the approved TaskAgentDetect') { return 'CloudbaseProfileDeferred' }
+    if ($Message -match '(?i)Cloudbase.*(?:profile.*(?:loaded|Special)|hive.*mounted|loaded-profile)|loaded Cloudbase identity') { return 'CloudbaseProfileUnsafe' }
+    $hasNegativeSignal = $Message -match '(?i)\b(failed|failure|mismatch|missing|unsafe|untrusted|unknown|refused|refusing|cannot|requires|still|appeared)\b|\bcould not\b|\bdoes not\b|\bdid not\b|\bnot\s+(?:running|trusted|found|available|valid|match)|\bloaded or special\b|\bprofile is loaded\b|\bcurrently loaded\b'
+    if (-not $hasNegativeSignal -and $Message -match '(?i)\b(started|passed|completed|created|loaded|confirmed|recorded|reused|returned)\b') { return 'Success' }
     switch -Regex ($Message) {
         '(?i)manifest'                              { return 'ManifestValidationFailed' }
         '(?i)unsupported Windows build'             { return 'UnsupportedWindowsBuild' }
@@ -1502,6 +1507,28 @@ function Get-CTDiagnosticInventoryView {
             MarkerMatches   = [string]$guard.Marker -eq $script:GuardOwner
         }
     }
+    $cloudbaseAccount = @($Inventory.LocalUsers | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
+    $exactCloudbaseProfiles = @($Inventory.CloudbaseProfiles | Where-Object { $_.LocalPath -ieq 'C:\Users\cloudbase-init' })
+    $cloudbaseProjectionSid = if ($null -ne $cloudbaseAccount) { [string]$cloudbaseAccount.SID } elseif ($exactCloudbaseProfiles.Count -eq 1) { [string]$exactCloudbaseProfiles[0].SID } else { $null }
+    $cloudbaseProjectionSidProfiles = @()
+    if (-not [string]::IsNullOrWhiteSpace($cloudbaseProjectionSid)) {
+        $cloudbaseProjectionSidProfiles = @($Inventory.CloudbaseProfiles | Where-Object { [string]$_.SID -eq $cloudbaseProjectionSid })
+    }
+    elseif ($exactCloudbaseProfiles.Count -eq 0) {
+        $cloudbaseProjectionSidProfiles = @($Inventory.CloudbaseProfiles)
+    }
+    $unexpectedCloudbaseProfileCount = @($cloudbaseProjectionSidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count
+    $cloudbaseHiveMountedCount = @($exactCloudbaseProfiles | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.SID) -and (Test-Path -LiteralPath ("Registry::HKEY_USERS\$([string]$_.SID)"))
+    }).Count
+    $accountProfileSidMatches = if ($null -ne $cloudbaseAccount -and $exactCloudbaseProfiles.Count -eq 1) {
+        [string]::Equals([string]$cloudbaseAccount.SID, [string]$exactCloudbaseProfiles[0].SID, [StringComparison]::OrdinalIgnoreCase)
+    }
+    else { $null }
+    $currentIdentityMatches = if ($exactCloudbaseProfiles.Count -eq 1) {
+        [string]::Equals([string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value), [string]$exactCloudbaseProfiles[0].SID, [StringComparison]::OrdinalIgnoreCase)
+    }
+    else { $null }
 
     return [PSCustomObject]@{
         CoreServices       = @($coreServices)
@@ -1513,8 +1540,14 @@ function Get-CTDiagnosticInventoryView {
         ExecutionGuards    = @($guards)
         KnownCertificates  = @($certificates)
         WsusClassification = [string](Get-CTWsusPolicySignature -Manifest $Manifest).Classification
-        CloudbaseAccountPresent = @($Inventory.LocalUsers | Where-Object { $_.Name -eq 'cloudbase-init' }).Count -gt 0
-        CloudbaseProfileCount   = @($Inventory.CloudbaseProfiles).Count
+        CloudbaseAccountPresent = $null -ne $cloudbaseAccount
+        CloudbaseProfileCount   = $exactCloudbaseProfiles.Count
+        CloudbaseProfileLoadedCount = @($exactCloudbaseProfiles | Where-Object { [bool]$_.Loaded }).Count
+        CloudbaseProfileSpecialCount = @($exactCloudbaseProfiles | Where-Object { [bool]$_.Special }).Count
+        CloudbaseProfileHiveMountedCount = $cloudbaseHiveMountedCount
+        CloudbaseUnexpectedProfileCount = $unexpectedCloudbaseProfileCount
+        CloudbaseAccountProfileIdentityMatches = $accountProfileSidMatches
+        CloudbaseCurrentIdentityMatches = $currentIdentityMatches
         VendorProcessCount      = @($Inventory.VendorProcesses).Count
         VendorTaskCount         = @($Inventory.VendorTasks).Count
         UnknownCertificateCandidateCount = @($Inventory.CertificateCandidates | Where-Object {
@@ -1875,13 +1908,15 @@ function New-CTyunTrimDiagnosticBundle {
 
         $contextView = if ($validation.Valid) { Get-CTDiagnosticContextView -Context $context -Manifest $manifest } else { [PSCustomObject]@{ Bound = $false; Status = 'Stateless'; RebootNeeded = $false; OperationCount = 0; PendingCount = 0; Operations = @(); Issues = @() } }
         $eventView = if ($validation.Valid) { @(Get-CTDiagnosticEventView -Manifest $manifest) } else { @() }
+        $primaryFailureCode = if ($PrimarySucceeded) { 'None' } else { Get-CTDiagnosticCode -Message $FailureMessage }
+        if (-not $PrimarySucceeded -and $primaryFailureCode -in @('None', 'Success')) { $primaryFailureCode = 'OperationFailed' }
         $summary = [ordered]@{
             SchemaVersion    = '1.0'
             ToolVersion      = $script:CTyunTrimVersion
             InvocationId     = if ([string]$script:DiagnosticInvocationId -match '^[0-9a-f]{32}$') { [string]$script:DiagnosticInvocationId } else { 'Unavailable' }
             Mode             = $Mode
             PrimarySucceeded = $PrimarySucceeded
-            FailureCode      = if ($PrimarySucceeded) { 'None' } else { Get-CTDiagnosticCode -Message $FailureMessage }
+            FailureCode      = $primaryFailureCode
             ManifestValid    = [bool]$validation.Valid
             ManifestHashMatches = [bool]($validation.Valid -and [string]$validation.ManifestHash -eq $script:ApprovedManifestSha256)
             InventoryStatus  = $inventoryStatus
@@ -3770,6 +3805,214 @@ function Test-CTSafeCloudbaseSid {
     return $rid -ge 1000
 }
 
+function Test-CTCloudbasePrepareProcessEvidence {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Evidence,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedImage
+    )
+
+    $failures = New-Object Collections.Generic.List[string]
+    $expectedPath = ConvertTo-CTFullPath -Path $ExpectedImage
+    $expectedName = [IO.Path]::GetFileNameWithoutExtension($expectedPath)
+    $expectedFileName = [IO.Path]::GetFileName($expectedPath)
+    $processId = Get-CTPropertyValue -InputObject $Evidence -Name 'ProcessId'
+    $sessionId = Get-CTPropertyValue -InputObject $Evidence -Name 'SessionId'
+    $stable = Get-CTPropertyValue -InputObject $Evidence -Name 'Stable'
+    $hasReparsePoint = Get-CTPropertyValue -InputObject $Evidence -Name 'HasReparsePoint'
+    $secureSource = Get-CTPropertyValue -InputObject $Evidence -Name 'SecureSource'
+    if ([string](Get-CTPropertyValue -InputObject $Evidence -Name 'ProcessName') -cne $expectedName -or
+        [string](Get-CTPropertyValue -InputObject $Evidence -Name 'CimName') -cne $expectedFileName) {
+        $failures.Add('ProcessNameMismatch')
+    }
+    if (-not [string]::Equals([string](Get-CTPropertyValue -InputObject $Evidence -Name 'Path'), $expectedPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string](Get-CTPropertyValue -InputObject $Evidence -Name 'CimPath'), $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        $failures.Add('ProcessPathMismatch')
+    }
+    if (-not [string]::Equals([string](Get-CTPropertyValue -InputObject $Evidence -Name 'OwnerSid'), $ExpectedSid, [StringComparison]::OrdinalIgnoreCase)) {
+        $failures.Add('ProcessOwnerMismatch')
+    }
+    if ($processId -isnot [int] -or [int]$processId -le 0 -or
+        [string](Get-CTPropertyValue -InputObject $Evidence -Name 'StartTimeUtcTicks') -notmatch '^[0-9]{10,20}$' -or
+        $stable -isnot [bool] -or $stable -ne $true) {
+        $failures.Add('ProcessIdentityUnstable')
+    }
+    if ($sessionId -isnot [uint32] -and $sessionId -isnot [int]) {
+        $failures.Add('ProcessSessionUnknown')
+    }
+    elseif ([uint32]$sessionId -ne 0) {
+        $failures.Add('InteractiveSessionDetected')
+    }
+    if ([string](Get-CTPropertyValue -InputObject $Evidence -Name 'SignatureStatus') -ne 'Valid' -or
+        [string](Get-CTPropertyValue -InputObject $Evidence -Name 'FileSha256') -notmatch '^[0-9A-F]{64}$') {
+        $failures.Add('ProcessSignatureInvalid')
+    }
+    if ($hasReparsePoint -isnot [bool] -or $hasReparsePoint -ne $false -or
+        $secureSource -isnot [bool] -or $secureSource -ne $true) {
+        $failures.Add('ProcessPathUnsafe')
+    }
+
+    [PSCustomObject]@{
+        Passed   = $failures.Count -eq 0
+        Failures = $failures.ToArray()
+    }
+}
+
+function Get-CTProcessesByOwnerSid {
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Sid)) { throw 'A nonempty owner SID is required for process inventory.' }
+    try { $processSnapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw "Process owner SID inventory failed: $($_.Exception.Message)" }
+
+    $owned = New-Object Collections.Generic.List[object]
+    $unresolved = New-Object Collections.Generic.List[uint32]
+    foreach ($cimProcess in $processSnapshot) {
+        $processId = [uint32]$cimProcess.ProcessId
+        if ($processId -in @(0, 4)) { continue }
+        $candidate = $cimProcess
+        $owner = $null
+        try {
+            $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
+        }
+        catch { $owner = $null }
+        if ($null -eq $owner -or [uint32]$owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
+            try { $retry = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = $processId") -ErrorAction Stop) }
+            catch { $unresolved.Add($processId); continue }
+            if ($retry.Count -eq 0) { continue }
+            if ($retry.Count -ne 1) { $unresolved.Add($processId); continue }
+            $candidate = $retry[0]
+            try { $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop }
+            catch { $owner = $null }
+            if ($null -eq $owner -or [uint32]$owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
+                $unresolved.Add($processId)
+                continue
+            }
+        }
+        if (-not [string]::Equals([string]$owner.Sid, $Sid, [StringComparison]::OrdinalIgnoreCase)) { continue }
+
+        $process = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+        if ($null -eq $process) {
+            try { $stillLive = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = $processId") -ErrorAction Stop) }
+            catch { throw "Targeted process liveness query failed after Get-Process failed for PID $processId." }
+            if ($stillLive.Count -eq 0) { continue }
+            if ($stillLive.Count -ne 1) { throw "A target-SID process remained live with ambiguous identity for PID $processId." }
+            try { $stillOwner = Invoke-CimMethod -InputObject $stillLive[0] -MethodName GetOwnerSid -ErrorAction Stop }
+            catch { $stillOwner = $null }
+            if ($null -eq $stillOwner -or [uint32]$stillOwner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$stillOwner.Sid)) {
+                throw "A live process could not be revalidated after Get-Process failed for PID $processId."
+            }
+            if ([string]::Equals([string]$stillOwner.Sid, $Sid, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "A live target-SID process could not be inspected safely for PID $processId."
+            }
+            continue
+        }
+        $path = $null
+        $startTimeUtcTicks = $null
+        try { $path = ConvertTo-CTFullPath -Path ([string]$process.Path) } catch { }
+        try { $startTimeUtcTicks = [string]$process.StartTime.ToUniversalTime().Ticks } catch { }
+
+        try { $freshCim = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = $processId") -ErrorAction Stop) }
+        catch { $freshCim = @() }
+        $freshOwner = $null
+        if ($freshCim.Count -eq 1) {
+            try { $freshOwner = Invoke-CimMethod -InputObject $freshCim[0] -MethodName GetOwnerSid -ErrorAction Stop }
+            catch { $freshOwner = $null }
+        }
+        $stable = $freshCim.Count -eq 1 -and $null -ne $freshOwner -and [uint32]$freshOwner.ReturnValue -eq 0 -and
+            [string]::Equals([string]$freshOwner.Sid, $Sid, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$candidate.Name, [string]$freshCim[0].Name, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$candidate.CreationDate, [string]$freshCim[0].CreationDate, [StringComparison]::Ordinal)
+        $owned.Add([PSCustomObject]@{
+            ProcessId         = [int]$processId
+            ProcessName       = [string]$process.ProcessName
+            CimName           = [string]$candidate.Name
+            Path              = $path
+            CimPath           = [string]$candidate.ExecutablePath
+            OwnerSid          = [string]$owner.Sid
+            SessionId         = $candidate.SessionId
+            StartTimeUtcTicks = $startTimeUtcTicks
+            Stable            = $stable
+        })
+    }
+    if ($unresolved.Count -gt 0) {
+        throw "Process owner SID inventory remained unresolved for $($unresolved.Count) live processes."
+    }
+    return $owned.ToArray()
+}
+
+function Get-CTCloudbaseOwnedProcessEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest
+    )
+
+    $taskEntries = @($Manifest.ScheduledTasks | Where-Object { $_.Name -eq 'ecloud_update_agent_detect' })
+    if ($taskEntries.Count -ne 1) { throw 'The immutable TaskAgentDetect scheduled-task identity is missing or ambiguous.' }
+    $expectedImage = ConvertTo-CTFullPath -Path ([string]$taskEntries[0].ExpectedImage)
+    if ([IO.Path]::GetFileName($expectedImage) -cne 'TaskAgentDetect.exe') { throw 'The immutable TaskAgentDetect image name is unexpected.' }
+
+    $evidence = New-Object Collections.Generic.List[object]
+    foreach ($item in @(Get-CTProcessesByOwnerSid -Sid $Sid)) {
+        try {
+            $fileEvidence = Get-CTCoreFileEvidence -Path ([string]$item.Path)
+            $item | Add-Member -NotePropertyName SignatureStatus -NotePropertyValue ([string]$fileEvidence.SignatureStatus)
+            $item | Add-Member -NotePropertyName FileSha256 -NotePropertyValue ([string]$fileEvidence.FileSha256)
+            $item | Add-Member -NotePropertyName HasReparsePoint -NotePropertyValue (Test-CTPathHasReparsePoint -Path ([string]$item.Path))
+            $item | Add-Member -NotePropertyName SecureSource -NotePropertyValue ([bool]$fileEvidence.SecureSource)
+        }
+        catch {
+            $item | Add-Member -NotePropertyName SignatureStatus -NotePropertyValue 'Unavailable'
+            $item | Add-Member -NotePropertyName FileSha256 -NotePropertyValue $null
+            $item | Add-Member -NotePropertyName HasReparsePoint -NotePropertyValue $true
+            $item | Add-Member -NotePropertyName SecureSource -NotePropertyValue $false
+        }
+        $validation = Test-CTCloudbasePrepareProcessEvidence -Evidence $item -ExpectedSid $Sid -ExpectedImage $expectedImage
+        $item | Add-Member -NotePropertyName Approved -NotePropertyValue ([bool]$validation.Passed)
+        $item | Add-Member -NotePropertyName Failures -NotePropertyValue @($validation.Failures)
+        $evidence.Add($item)
+    }
+    return $evidence.ToArray()
+}
+
+function Get-CTCloudbaseIdentityAnchors {
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [object[]]$TaskSnapshot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Sid)) { return @() }
+    $anchors = New-Object Collections.Generic.List[string]
+    foreach ($entry in @($Manifest.Services | Where-Object { $_.Name -in @('cloudbase-init', 'cloudbase-init-unattend') })) {
+        $service = Get-CTServiceByName -Name $entry.Name
+        if ($null -eq $service -or -not (Test-CTExpectedService -Service $service -ExpectedImage $entry.ExpectedImage)) { continue }
+        $serviceSid = Resolve-CTAccountSid -Identity ([string]$service.StartName)
+        if ([string]::Equals($serviceSid, $Sid, [StringComparison]::OrdinalIgnoreCase)) {
+            $anchors.Add("service:$($entry.Name)")
+        }
+    }
+
+    $tasks = if ($null -ne $TaskSnapshot) { @($TaskSnapshot) } else { @(Get-ScheduledTask -ErrorAction Stop) }
+    $tasks = @($tasks)
+    foreach ($entry in $Manifest.ScheduledTasks) {
+        foreach ($task in @($tasks | Where-Object {
+            ([string]$_.TaskName).Equals([string]$entry.Name, [StringComparison]::OrdinalIgnoreCase) -and
+            ([string]$_.TaskPath).Equals([string]$entry.TaskPath, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            if (-not (Test-CTScheduledTaskDefinition -Task $task -Entry $entry)) { continue }
+            $principal = Get-CTPropertyValue -InputObject $task -Name 'Principal'
+            $principalSid = Resolve-CTAccountSid -Identity ([string](Get-CTPropertyValue -InputObject $principal -Name 'UserId'))
+            if ([string]::Equals($principalSid, $Sid, [StringComparison]::OrdinalIgnoreCase)) {
+                $anchors.Add("task:$($entry.TaskPath)$($entry.Name)")
+            }
+        }
+    }
+    return @($anchors.ToArray() | Sort-Object -Unique)
+}
+
 function Save-CTCloudbaseIdentityEvidence {
     param(
         [Parameter(Mandatory = $true)][PSObject]$Context,
@@ -3783,12 +4026,13 @@ function Save-CTCloudbaseIdentityEvidence {
         $recordedMachineSid = [string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'MachineSid')
         $recordedState = [string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'State')
         $recordedServices = @(Get-CTPropertyValue -InputObject $existing[0].Data -Name 'Services')
+        $recordedAnchors = @(Get-CTPropertyValue -InputObject $existing[0].Data -Name 'IdentityAnchors')
         if (-not $recordedRoot.Equals((ConvertTo-CTFullPath -Path $Manifest.Roots.Cloudbase), [StringComparison]::OrdinalIgnoreCase) -or
             $recordedMachineSid -ne [string]$Context.MachineSid) {
             throw 'Archived Cloudbase identity evidence does not belong to this manifest or machine.'
         }
         if ($recordedState -eq 'AbsentAtBaseline') {
-            if ($recordedServices.Count -ne 0 -or
+            if ($recordedServices.Count -ne 0 -or $recordedAnchors.Count -ne 0 -or
                 -not [string]::IsNullOrWhiteSpace([string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'AccountSid')) -or
                 -not [string]::IsNullOrWhiteSpace([string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'ProfileSid'))) {
                 throw 'Archived absent-at-baseline Cloudbase evidence is internally inconsistent.'
@@ -3796,14 +4040,18 @@ function Save-CTCloudbaseIdentityEvidence {
             return $existing[0]
         }
         if ($recordedState -eq 'ServicePresentIdentityAbsent') {
-            if ($recordedServices.Count -eq 0 -or
+            if ($recordedServices.Count -eq 0 -or $recordedAnchors.Count -ne 0 -or
                 -not [string]::IsNullOrWhiteSpace([string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'AccountSid')) -or
                 -not [string]::IsNullOrWhiteSpace([string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'ProfileSid'))) {
                 throw 'Archived service-present/identity-absent Cloudbase evidence is internally inconsistent.'
             }
         }
-        elseif ($recordedState -ne 'PresentAtBaseline' -or $recordedServices.Count -eq 0) {
+        elseif ($recordedState -ne 'PresentAtBaseline' -or $recordedServices.Count -eq 0 -or $recordedAnchors.Count -eq 0) {
             throw 'Archived Cloudbase identity evidence has no exact service record.'
+        }
+        $allowedAnchors = @('service:cloudbase-init', 'service:cloudbase-init-unattend') + @($Manifest.ScheduledTasks | ForEach-Object { "task:$($_.TaskPath)$($_.Name)" })
+        if (@($recordedAnchors | Where-Object { $_ -notin $allowedAnchors }).Count -gt 0) {
+            throw 'Archived Cloudbase identity evidence contains an unexpected principal anchor.'
         }
         $recordedSid = [string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'AccountSid')
         if ([string]::IsNullOrWhiteSpace($recordedSid)) { $recordedSid = [string](Get-CTPropertyValue -InputObject $existing[0].Data -Name 'ProfileSid') }
@@ -3832,6 +4080,12 @@ function Save-CTCloudbaseIdentityEvidence {
     if (-not [string]::IsNullOrWhiteSpace($observedSid) -and -not (Test-CTSafeCloudbaseSid -Sid $observedSid -MachineSid ([string]$Context.MachineSid))) {
         throw 'The cloudbase-init identity uses a built-in, foreign or otherwise unsafe SID.'
     }
+    if (-not [string]::IsNullOrWhiteSpace($observedSid)) {
+        $sidProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $observedSid })
+        if (@($sidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count -gt 0 -or $sidProfiles.Count -gt 1) {
+            throw 'The cloudbase-init SID has an unexpected or additional Profile path; baseline evidence was refused.'
+        }
+    }
 
     $serviceEvidence = New-Object Collections.Generic.List[object]
     foreach ($entry in @($Manifest.Services | Where-Object { $_.Name -in @('cloudbase-init', 'cloudbase-init-unattend') })) {
@@ -3856,6 +4110,14 @@ function Save-CTCloudbaseIdentityEvidence {
     if (($null -ne $account -or $profiles.Count -gt 0) -and $serviceEvidence.Count -eq 0) {
         throw 'A cloudbase-init account/profile exists, but no exact Cloudbase service establishes ownership. Identity deletion was refused.'
     }
+    $identityAnchors = if (-not [string]::IsNullOrWhiteSpace($observedSid)) {
+        @(Get-CTCloudbaseIdentityAnchors -Sid $observedSid -Manifest $Manifest)
+    }
+    else { @() }
+    $identityAnchors = @($identityAnchors)
+    if (-not [string]::IsNullOrWhiteSpace($observedSid) -and $identityAnchors.Count -eq 0) {
+        throw 'The cloudbase-init account/Profile is not bound to an exact Cloudbase service or scheduled-task principal SID.'
+    }
     Add-CTOperation -Context $Context -Type 'CloudbaseIdentityEvidence' -Target (ConvertTo-CTFullPath -Path $Manifest.Roots.Cloudbase) -Data @{
         State         = if ($serviceEvidence.Count -eq 0) { 'AbsentAtBaseline' } elseif ([string]::IsNullOrWhiteSpace($observedSid)) { 'ServicePresentIdentityAbsent' } else { 'PresentAtBaseline' }
         MachineSid    = [string]$Context.MachineSid
@@ -3864,6 +4126,7 @@ function Save-CTCloudbaseIdentityEvidence {
         ProfilePath   = if ($profiles.Count -eq 1) { [string]$profiles[0].LocalPath } else { $null }
         ProfileSid    = if ($profiles.Count -eq 1) { [string]$profiles[0].SID } else { $null }
         Services      = $serviceEvidence.ToArray()
+        IdentityAnchors = @($identityAnchors)
     }
     return @($Context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' }) | Select-Object -First 1
 }
@@ -3967,14 +4230,24 @@ function Remove-CTCloudbaseIdentity {
     if ($null -ne $account -and [string]$account.Name -ne 'cloudbase-init') {
         throw "The archived Cloudbase SID now belongs to a renamed account. Manual review is required: $($account.Name) / $expectedSid"
     }
-    if ($profiles.Count -gt 1) { throw 'Multiple exact cloudbase-init profile records were found.' }
-    if ($profiles.Count -eq 1 -and [string]$profiles[0].SID -ne $expectedSid) {
-        throw 'The current cloudbase-init profile SID differs from the archived ownership evidence.'
+    $allProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)
+    $sidProfiles = @($allProfiles | Where-Object { [string]$_.SID -eq $expectedSid })
+    $unexpectedSidProfiles = @($sidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' })
+    if ($unexpectedSidProfiles.Count -gt 0 -or $sidProfiles.Count -gt 1) {
+        throw 'The archived Cloudbase SID is associated with an unexpected or additional user Profile path.'
     }
+    $profiles = @($sidProfiles | Where-Object { $_.LocalPath -ieq 'C:\Users\cloudbase-init' })
 
     $currentIdentitySid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
     if ($currentIdentitySid -eq $expectedSid) {
         throw 'Refusing to remove the account that is running CTyunTrim.'
+    }
+    $ownedProcesses = @(Get-CTProcessesByOwnerSid -Sid $expectedSid)
+    if ($ownedProcesses.Count -gt 0) {
+        throw 'Refusing Cloudbase identity removal while a process still runs under the archived SID.'
+    }
+    if (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) {
+        throw 'Refusing Cloudbase identity removal while its user hive remains mounted.'
     }
     $references = @(Get-CTCloudbaseIdentityReferences -Sid $expectedSid)
     if ($references.Count -gt 0) {
@@ -3995,33 +4268,104 @@ function Remove-CTCloudbaseIdentity {
         return [PSCustomObject]@{ Deferred = $true; References = $references }
     }
 
-    if ($null -ne $account) {
-        if (Confirm-CTRequiredOperation -Caller $Caller -Target "cloudbase-init ($expectedSid)" -Action 'Remove exact local service account SID') {
-            $operationId = Start-CTOperation -Context $Context -Type 'LocalUser' -Target 'cloudbase-init' -Data @{
-                SID     = [string]$account.SID
-                Enabled = [bool]$account.Enabled
-            } -Reversible $false
-            Disable-LocalUser -SID $account.SID -ErrorAction SilentlyContinue
-            $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
-            Remove-LocalGroupMember -SID $administratorsSid -Member $account -ErrorAction SilentlyContinue
-            Remove-LocalUser -SID $account.SID -ErrorAction Stop
-            Complete-CTOperation -Context $Context -Id $operationId
+    $allProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)
+    $sidProfiles = @($allProfiles | Where-Object { [string]$_.SID -eq $expectedSid })
+    $unexpectedSidProfiles = @($sidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' })
+    if ($unexpectedSidProfiles.Count -gt 0 -or $sidProfiles.Count -gt 1) {
+        throw 'The Cloudbase SID acquired an unexpected or additional Profile before identity removal.'
+    }
+    $profiles = @($sidProfiles | Where-Object { $_.LocalPath -ieq 'C:\Users\cloudbase-init' })
+    foreach ($profile in $profiles) {
+        if ($profile.Loaded -or $profile.Special -or (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+            (Test-CTPathHasReparsePoint -Path ([string]$profile.LocalPath))) {
+            throw "Refusing to remove a loaded, special or unsafe cloudbase-init Profile: $($profile.LocalPath)"
         }
     }
 
-    foreach ($profile in $profiles) {
-        if ($profile.Loaded -or $profile.Special) {
-            throw "Refusing to remove loaded or special cloudbase-init profile: $($profile.LocalPath)"
+    $accountOperationId = $null
+    if ($null -ne $account) {
+        if (Confirm-CTRequiredOperation -Caller $Caller -Target "cloudbase-init ($expectedSid)" -Action 'Disable and remove exact local service account SID') {
+            $finalAccounts = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+            $finalOwnedProcesses = @(Get-CTProcessesByOwnerSid -Sid $expectedSid)
+            $finalSidProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+            if ($finalAccounts.Count -ne 1 -or [string]$finalAccounts[0].Name -ne 'cloudbase-init' -or
+                $finalOwnedProcesses.Count -gt 0 -or $finalSidProfiles.Count -gt 1 -or @($finalSidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count -gt 0 -or
+                @($finalSidProfiles | Where-Object { [bool]$_.Loaded -or [bool]$_.Special }).Count -gt 0 -or
+                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid"))) {
+                throw 'Cloudbase identity state changed before account disable; no identity object was removed.'
+            }
+            $account = $finalAccounts[0]
+            $pendingAccount = Get-CTPendingOperation -Context $Context -Type 'LocalUser' -Target 'cloudbase-init'
+            if ($null -ne $pendingAccount) {
+                if ([string](Get-CTPropertyValue -InputObject $pendingAccount.Data -Name 'SID') -ne $expectedSid) {
+                    throw 'Pending Cloudbase account operation has a different SID.'
+                }
+                $accountOperationId = [string]$pendingAccount.Id
+            }
+            else {
+                $accountOperationId = Start-CTOperation -Context $Context -Type 'LocalUser' -Target 'cloudbase-init' -Data @{
+                    SID     = [string]$account.SID
+                    Enabled = [bool]$account.Enabled
+                } -Reversible $false
+            }
+            Disable-LocalUser -SID $account.SID -ErrorAction Stop
+            $postDisableAccounts = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+            $postDisableProcesses = @(Get-CTProcessesByOwnerSid -Sid $expectedSid)
+            $postDisableProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+            if ($postDisableAccounts.Count -ne 1 -or [string]$postDisableAccounts[0].Name -ne 'cloudbase-init' -or [bool]$postDisableAccounts[0].Enabled -or
+                $postDisableProcesses.Count -gt 0 -or $postDisableProfiles.Count -gt 1 -or @($postDisableProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count -gt 0 -or
+                @($postDisableProfiles | Where-Object { [bool]$_.Loaded -or [bool]$_.Special }).Count -gt 0 -or
+                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid"))) {
+                throw 'Cloudbase identity could not be proven inactive after account disable; deletion was deferred with its journal entry pending.'
+            }
+            $account = $postDisableAccounts[0]
+            $profiles = @($postDisableProfiles)
         }
-        if (Test-CTPathHasReparsePoint -Path ([string]$profile.LocalPath)) {
-            throw "Refusing to remove a cloudbase-init profile through a reparse point: $($profile.LocalPath)"
-        }
+    }
+    if ($null -ne $account -and [string]::IsNullOrWhiteSpace($accountOperationId)) {
+        throw 'Cloudbase account operation was not confirmed; no Profile or account was removed.'
+    }
 
+    foreach ($profile in $profiles) {
         if (Confirm-CTRequiredOperation -Caller $Caller -Target $profile.LocalPath -Action 'Remove orphaned cloudbase-init user profile') {
-            $operationId = Start-CTOperation -Context $Context -Type 'UserProfile' -Target $profile.LocalPath -Data @{ SID = [string]$profile.SID } -Reversible $false
+            $boundaryProcesses = @(Get-CTProcessesByOwnerSid -Sid $expectedSid)
+            $finalProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+            if ($boundaryProcesses.Count -gt 0 -or $finalProfiles.Count -ne 1 -or $finalProfiles[0].LocalPath -ine 'C:\Users\cloudbase-init' -or
+                [bool]$finalProfiles[0].Loaded -or [bool]$finalProfiles[0].Special -or
+                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+                (Test-CTPathHasReparsePoint -Path ([string]$finalProfiles[0].LocalPath))) {
+                throw 'Cloudbase Profile state changed at the deletion boundary; no Profile was removed.'
+            }
+            $profile = $finalProfiles[0]
+            $pendingProfile = Get-CTPendingOperation -Context $Context -Type 'UserProfile' -Target ([string]$profile.LocalPath)
+            if ($null -ne $pendingProfile) {
+                if ([string](Get-CTPropertyValue -InputObject $pendingProfile.Data -Name 'SID') -ne $expectedSid) {
+                    throw 'Pending Cloudbase Profile operation has a different SID.'
+                }
+                $profileOperationId = [string]$pendingProfile.Id
+            }
+            else {
+                $profileOperationId = Start-CTOperation -Context $Context -Type 'UserProfile' -Target $profile.LocalPath -Data @{ SID = [string]$profile.SID } -Reversible $false
+            }
             $profile | Remove-CimInstance -ErrorAction Stop
-            Complete-CTOperation -Context $Context -Id $operationId
+            Complete-CTOperation -Context $Context -Id $profileOperationId
         }
+    }
+
+    if ($null -ne $account) {
+        $finalOwnedProcesses = @(Get-CTProcessesByOwnerSid -Sid $expectedSid)
+        $finalSidProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+        $finalAccounts = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
+        if ($finalOwnedProcesses.Count -gt 0 -or $finalSidProfiles.Count -gt 0 -or
+            (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+            $finalAccounts.Count -ne 1 -or [string]$finalAccounts[0].Name -ne 'cloudbase-init' -or [bool]$finalAccounts[0].Enabled) {
+            throw 'Cloudbase identity changed before final account removal; the disabled account was preserved with its journal entry pending.'
+        }
+        $account = $finalAccounts[0]
+        $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+        Remove-LocalGroupMember -SID $administratorsSid -Member $account -ErrorAction SilentlyContinue
+        Remove-LocalUser -SID $account.SID -ErrorAction Stop
+        Complete-CTOperation -Context $Context -Id $accountOperationId
     }
     return [PSCustomObject]@{ Deferred = $false; References = @() }
 }
@@ -4367,7 +4711,10 @@ function Test-CTApplyPreflight {
 
         [string]$RunId,
 
-        [PSObject]$Context
+        [PSObject]$Context,
+
+        [ValidateSet('Prepare', 'Apply')]
+        [string]$Phase = 'Apply'
     )
 
     $errors = New-Object Collections.Generic.List[string]
@@ -4531,9 +4878,30 @@ function Test-CTApplyPreflight {
     catch { $allUserProfiles = @(); $errors.Add("Cloudbase user-profile preflight inventory failed: $($_.Exception.Message)") }
     $cloudbaseAccount = @($cloudbaseUsers | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
     $cloudbaseProfiles = @($allUserProfiles | Where-Object { $_.LocalPath -ieq 'C:\Users\cloudbase-init' })
-    foreach ($profile in $cloudbaseProfiles) {
-        if ($profile.Loaded -or $profile.Special) {
-            $errors.Add("cloudbase-init profile is loaded or special: $($profile.LocalPath)")
+    $archivedEvidence = @()
+    if ($null -ne $Context) {
+        $archivedEvidence = @($Context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' })
+    }
+    if ($archivedEvidence.Count -gt 1) {
+        $errors.Add('Multiple archived Cloudbase identity evidence records were found.')
+    }
+    $archivedIdentitySid = $null
+    if ($archivedEvidence.Count -eq 1 -and
+        [string](Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'State') -eq 'PresentAtBaseline') {
+        $archivedAccountSid = [string](Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'AccountSid')
+        $archivedProfileSid = [string](Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'ProfileSid')
+        $archivedAnchors = @(Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'IdentityAnchors')
+        if (-not [string]::IsNullOrWhiteSpace($archivedAccountSid) -and -not [string]::IsNullOrWhiteSpace($archivedProfileSid) -and
+            -not [string]::Equals($archivedAccountSid, $archivedProfileSid, [StringComparison]::OrdinalIgnoreCase)) {
+            $errors.Add('Archived Cloudbase account and Profile SIDs do not match.')
+        }
+        $archivedIdentitySid = if (-not [string]::IsNullOrWhiteSpace($archivedAccountSid)) { $archivedAccountSid } else { $archivedProfileSid }
+        if ([string]::IsNullOrWhiteSpace($archivedIdentitySid)) {
+            $errors.Add('Archived present-at-baseline Cloudbase evidence has no identity SID.')
+        }
+        $allowedArchivedAnchors = @('service:cloudbase-init', 'service:cloudbase-init-unattend') + @($Manifest.ScheduledTasks | ForEach-Object { "task:$($_.TaskPath)$($_.Name)" })
+        if ($archivedAnchors.Count -eq 0 -or @($archivedAnchors | Where-Object { $_ -notin $allowedArchivedAnchors }).Count -gt 0) {
+            $errors.Add('Archived present-at-baseline Cloudbase evidence has no valid principal SID anchor.')
         }
     }
     if ($cloudbaseProfiles.Count -gt 1) {
@@ -4542,15 +4910,99 @@ function Test-CTApplyPreflight {
     if ($null -ne $cloudbaseAccount -and $cloudbaseProfiles.Count -eq 1 -and [string]$cloudbaseAccount.SID -ne [string]$cloudbaseProfiles[0].SID) {
         $errors.Add('cloudbase-init account and profile SIDs do not match.')
     }
-    $archivedEvidence = @()
-    if ($null -ne $Context) {
-        $archivedEvidence = @($Context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' })
+    $cloudbaseIdentitySid = if ($null -ne $cloudbaseAccount) {
+        [string]$cloudbaseAccount.SID
+    }
+    elseif ($cloudbaseProfiles.Count -eq 1) { [string]$cloudbaseProfiles[0].SID }
+    elseif (-not [string]::IsNullOrWhiteSpace($archivedIdentitySid)) { $archivedIdentitySid }
+    else { $null }
+    $cloudbaseSidProfiles = @()
+    if (-not [string]::IsNullOrWhiteSpace($cloudbaseIdentitySid)) {
+        $cloudbaseSidProfiles = @($allUserProfiles | Where-Object { [string]$_.SID -eq $cloudbaseIdentitySid })
+    }
+    $unexpectedCloudbaseProfiles = @($cloudbaseSidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' })
+    if ($unexpectedCloudbaseProfiles.Count -gt 0 -or $cloudbaseSidProfiles.Count -ne $cloudbaseProfiles.Count) {
+        $errors.Add('Cloudbase identity SID is associated with an unexpected or additional user Profile path.')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($cloudbaseIdentitySid) -and
+        (Test-Path -LiteralPath ("Registry::HKEY_USERS\$cloudbaseIdentitySid")) -and
+        $cloudbaseProfiles.Count -eq 0) {
+        $errors.Add('Cloudbase identity user hive is mounted without its one exact Profile record.')
+    }
+    if (($null -ne $cloudbaseAccount -or $cloudbaseProfiles.Count -gt 0) -and $archivedEvidence.Count -eq 0 -and
+        -not [string]::IsNullOrWhiteSpace($cloudbaseIdentitySid)) {
+        try {
+            $currentIdentityAnchors = @(Get-CTCloudbaseIdentityAnchors -Sid $cloudbaseIdentitySid -Manifest $Manifest -TaskSnapshot $taskSnapshot)
+            if ($currentIdentityAnchors.Count -eq 0) {
+                $errors.Add('Cloudbase account/Profile has no exact service or scheduled-task principal SID anchor.')
+            }
+        }
+        catch { $errors.Add("Cloudbase principal SID anchor validation failed: $($_.Exception.Message)") }
+    }
+    $validCloudbaseServices = @($Manifest.Services | Where-Object { $_.Name -in @('cloudbase-init', 'cloudbase-init-unattend') } | ForEach-Object {
+        $service = Get-CTServiceByName -Name $_.Name
+        if ($null -ne $service -and (Test-CTExpectedService -Service $service -ExpectedImage $_.ExpectedImage)) { $service }
+    })
+    foreach ($profile in $cloudbaseProfiles) {
+        $profileSid = [string]$profile.SID
+        $hiveMounted = -not [string]::IsNullOrWhiteSpace($profileSid) -and
+            (Test-Path -LiteralPath ("Registry::HKEY_USERS\$profileSid"))
+        if ([bool]$profile.Special) {
+            $errors.Add("Cloudbase profile is marked Special and cannot be handled automatically: $($profile.LocalPath)")
+            continue
+        }
+        if ([bool]$profile.Loaded -or $hiveMounted) {
+            if ($Phase -ne 'Prepare') {
+                $errors.Add("Cloudbase profile is loaded or its user hive is mounted; Apply requires an unloaded profile: $($profile.LocalPath)")
+                continue
+            }
+
+            $loadedErrorCount = $errors.Count
+            if ($cloudbaseProfiles.Count -ne 1 -or $cloudbaseSidProfiles.Count -ne 1 -or $null -eq $cloudbaseAccount -or
+                -not [string]::Equals([string]$cloudbaseAccount.SID, $profileSid, [StringComparison]::OrdinalIgnoreCase)) {
+                $errors.Add('Cloudbase loaded-profile Prepare exception requires one matching account and profile SID.')
+            }
+            $machineSid = Get-CTMachineSid
+            if ([string]::IsNullOrWhiteSpace($machineSid) -or -not (Test-CTSafeCloudbaseSid -Sid $profileSid -MachineSid $machineSid)) {
+                $errors.Add('Cloudbase loaded-profile SID is not a safe local non-built-in account SID.')
+            }
+            if ([string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -eq $profileSid) {
+                $errors.Add('CTyunTrim is running as the loaded Cloudbase identity.')
+            }
+            if (Test-CTPathHasReparsePoint -Path ([string]$profile.LocalPath)) {
+                $errors.Add('Cloudbase loaded-profile path has a reparse-point ancestor.')
+            }
+            if ($validCloudbaseServices.Count -ne 1) {
+                $errors.Add('Cloudbase loaded-profile Prepare exception requires exactly one current reference service.')
+            }
+
+            try {
+                $ownedProcesses = @(Get-CTCloudbaseOwnedProcessEvidence -Sid $profileSid -Manifest $Manifest)
+                if ($ownedProcesses.Count -ne 1) {
+                    $errors.Add("Cloudbase loaded-profile Prepare exception requires exactly one owned process; found $($ownedProcesses.Count).")
+                }
+                elseif (-not [bool]$ownedProcesses[0].Approved) {
+                    $errors.Add("Cloudbase loaded-profile process failed identity validation: $(@($ownedProcesses[0].Failures) -join ', ')")
+                }
+            }
+            catch { $errors.Add("Cloudbase loaded-profile process validation failed: $($_.Exception.Message)") }
+
+            try {
+                $references = @(Get-CTCloudbaseIdentityReferences -Sid $profileSid)
+                $allowedReferences = @('service:cloudbase-init', 'service:cloudbase-init-unattend') + @($Manifest.ScheduledTasks | ForEach-Object { "task:$($_.TaskPath)$($_.Name)" })
+                $unexpectedReferences = @($references | Where-Object { $_ -notin $allowedReferences })
+                if ($unexpectedReferences.Count -gt 0) {
+                    $errors.Add("Cloudbase loaded-profile identity has unrelated service or task references: $($unexpectedReferences -join ', ')")
+                }
+            }
+            catch { $errors.Add("Cloudbase loaded-profile reference validation failed: $($_.Exception.Message)") }
+
+            if ($errors.Count -eq $loadedErrorCount) {
+                $warnings.Add('Cloudbase profile is loaded only by the approved TaskAgentDetect process; Prepare may neutralize it, but Apply still requires an unloaded profile after reboot.')
+            }
+        }
     }
     if ($null -ne $cloudbaseAccount -or $cloudbaseProfiles.Count -gt 0 -or $archivedEvidence.Count -gt 0) {
-        $validCloudbaseServices = @($Manifest.Services | Where-Object { $_.Name -in @('cloudbase-init', 'cloudbase-init-unattend') } | ForEach-Object {
-            $service = Get-CTServiceByName -Name $_.Name
-            if ($null -ne $service -and (Test-CTExpectedService -Service $service -ExpectedImage $_.ExpectedImage)) { $service }
-        })
         if ($archivedEvidence.Count -eq 1) {
             $evidenceState = [string](Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'State')
             $evidenceMachineSid = [string](Get-CTPropertyValue -InputObject $archivedEvidence[0].Data -Name 'MachineSid')
@@ -4645,7 +5097,7 @@ function Invoke-CTApply {
         }
     }
     else {
-        $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath
+        $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -Phase Apply
         if (-not $preflight.Passed) {
             throw "Apply preflight failed: $($preflight.Errors -join '; ')"
         }
@@ -4668,7 +5120,7 @@ function Invoke-CTApply {
         Save-CTRunContext -Context $context
         if ($resuming) {
             Resolve-CTPendingOperations -Context $context -Manifest $Manifest
-            $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $context.RunId -Context $context
+            $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $context.RunId -Context $context -Phase Apply
             if (-not $preflight.Passed) {
                 throw "Apply resume preflight failed: $($preflight.Errors -join '; ')"
             }
@@ -4680,14 +5132,27 @@ function Invoke-CTApply {
         if (-not $baselineHealth.Healthy) {
             throw "Core baseline continuity failed before Apply changes: $($baselineHealth.Failures -join '; ')"
         }
-        [void](Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest)
-        foreach ($warning in $preflight.Warnings) {
+        $identityEvidence = Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest
+        $preChangePreflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $context.RunId -Context $context -Phase Apply
+        if (-not $preChangePreflight.Passed) {
+            throw "Apply mutation-boundary preflight failed: $($preChangePreflight.Errors -join '; ')"
+        }
+        foreach ($warning in @(@($preflight.Warnings) + @($preChangePreflight.Warnings) | Sort-Object -Unique)) {
             Add-CTWarning -Context $context -Message $warning
         }
         Add-CTExecutionGuards -Context $context -Manifest $Manifest -Caller $Caller
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTScheduledTasks -Context $context -Manifest $Manifest -Caller $Caller
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
+        if ($null -ne $identityEvidence) {
+            $preparedIdentitySid = [string](Get-CTPropertyValue -InputObject $identityEvidence.Data -Name 'AccountSid')
+            if ([string]::IsNullOrWhiteSpace($preparedIdentitySid)) {
+                $preparedIdentitySid = [string](Get-CTPropertyValue -InputObject $identityEvidence.Data -Name 'ProfileSid')
+            }
+            if (-not [string]::IsNullOrWhiteSpace($preparedIdentitySid) -and @(Get-CTProcessesByOwnerSid -Sid $preparedIdentitySid).Count -gt 0) {
+                throw 'A process still runs under the Cloudbase identity after Apply guards and task removal.'
+            }
+        }
         Clear-CTFakeWsusPolicy -Context $context -Manifest $Manifest -LgpoPath $LgpoPath -Caller $Caller
         Remove-CTRunValues -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTStartupApprovedEntries -Context $context -Manifest $Manifest -Caller $Caller
@@ -4807,7 +5272,7 @@ function Invoke-CTPrepare {
         throw "CTyun installation root was not found: $($Manifest.Roots.CTyun)"
     }
 
-    $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath
+    $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -Phase Prepare
     if (-not $preflight.Passed) {
         throw "Prepare preflight failed: $($preflight.Errors -join '; ')"
     }
@@ -4819,14 +5284,27 @@ function Invoke-CTPrepare {
         if (-not $baselineHealth.Healthy) {
             throw "Core baseline continuity failed before Prepare changes: $($baselineHealth.Failures -join '; ')"
         }
-        [void](Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest)
-        foreach ($warning in $preflight.Warnings) {
+        $identityEvidence = Save-CTCloudbaseIdentityEvidence -Context $context -Manifest $Manifest
+        $preChangePreflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $context.RunId -Context $context -Phase Prepare
+        if (-not $preChangePreflight.Passed) {
+            throw "Prepare mutation-boundary preflight failed: $($preChangePreflight.Errors -join '; ')"
+        }
+        foreach ($warning in @(@($preflight.Warnings) + @($preChangePreflight.Warnings) | Sort-Object -Unique)) {
             Add-CTWarning -Context $context -Message $warning
         }
         Add-CTExecutionGuards -Context $context -Manifest $Manifest -Caller $Caller
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTScheduledTasks -Context $context -Manifest $Manifest -Caller $Caller
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
+        if ($null -ne $identityEvidence) {
+            $preparedIdentitySid = [string](Get-CTPropertyValue -InputObject $identityEvidence.Data -Name 'AccountSid')
+            if ([string]::IsNullOrWhiteSpace($preparedIdentitySid)) {
+                $preparedIdentitySid = [string](Get-CTPropertyValue -InputObject $identityEvidence.Data -Name 'ProfileSid')
+            }
+            if (-not [string]::IsNullOrWhiteSpace($preparedIdentitySid) -and @(Get-CTProcessesByOwnerSid -Sid $preparedIdentitySid).Count -gt 0) {
+                throw 'A process still runs under the Cloudbase identity after Prepare guards and task removal.'
+            }
+        }
         Clear-CTFakeWsusPolicy -Context $context -Manifest $Manifest -LgpoPath $LgpoPath -Caller $Caller
 
         $after = Get-CTyunTrimInventory -ManifestPath $context.ManifestPath

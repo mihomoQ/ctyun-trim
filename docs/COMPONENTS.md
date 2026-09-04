@@ -77,3 +77,9 @@ ecloud_update_* scheduled tasks
 The reference system's file audit attributed 17 restored `Mirror\Launch` files to the repair installer. Process and Group Policy logs attributed machine/user policy refresh calls to `clink_agent_data.exe` and `ExternalLaunch.exe` running as SYSTEM.
 
 Because `clink_agent_data.exe` is preserved, CTyunTrim retains six exact, marked IFEO execution guards. These are intentional persistent changes and can interfere with future vendor upgrades.
+
+## Loaded Cloudbase profile boundary
+
+The observed image can run the exact scheduled `TaskAgentDetect.exe` under the `cloudbase-init` account, which loads its user Profile. Prepare may proceed only when this is the sole account-owned process and its owner SID, session, immutable task image path, signature, source ACL, reparse state and process start identity all pass validation. The account SID must also be bound to an exact Cloudbase service `StartName` or an exact scheduled-task `Principal`; a same-name local account is not ownership evidence. Prepare then revalidates at the mutation boundary, installs the self-repair guards before stopping the process, removes the exact tasks, and proves no process remains under that SID. It does not unload the hive or remove the account/Profile.
+
+Apply never accepts a loaded Profile or mounted user hive. `Special=true`, an interactive session, an unknown process, an alternate same-SID Profile path, a path or signer mismatch, an unsafe SID, or an unrelated service/task reference remains a hard failure. Identity cleanup writes its journal, disables and verifies the exact account, rechecks owner processes immediately before Profile deletion, removes the exact unloaded Profile, and only then deletes the disabled account.
