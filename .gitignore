@@ -1,0 +1,13 @@
+*.log
+*.zip
+*.cer
+*.reg
+*.wfw
+*.clixml
+reports/
+runs/
+test-results/
+.vscode/
+.idea/
+tools/LGPO.exe
+artifacts/

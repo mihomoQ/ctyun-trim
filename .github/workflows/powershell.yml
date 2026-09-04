@@ -1,0 +1,59 @@
+name: PowerShell safety checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell-51:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static and manifest tests
+        shell: powershell
+        run: .\tests\Invoke-StaticTests.ps1
+      - name: Build release and verify checksum
+        shell: powershell
+        run: |
+          .\build\Build-Release.ps1 -Version 0.1.0 | Out-Null
+          $archive = '.\artifacts\CTyunTrim-0.1.0.zip'
+          $checksum = '.\artifacts\CTyunTrim-0.1.0.zip.sha256'
+          if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $checksum)) { throw 'Release outputs are missing.' }
+          $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw 'Release checksum mismatch.' }
+      - name: Audit smoke test on a non-CTyun runner
+        shell: powershell
+        run: .\CTyunTrim.ps1 -Mode Audit -Json | Out-Null
+      - name: Apply WhatIf smoke test
+        shell: powershell
+        run: .\CTyunTrim.ps1 -Mode Apply -WhatIf | Out-Null
+      - name: Prepare WhatIf smoke test
+        shell: powershell
+        run: .\CTyunTrim.ps1 -Mode Prepare -WhatIf | Out-Null
+      - name: Failed Verify returns a failing exit code
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP 'ctyuntrim-verify-stdout.json'
+          $stderr = Join-Path $env:RUNNER_TEMP 'ctyuntrim-verify-stderr.txt'
+          $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', 'Start-CTyunTrim.cmd', '-Mode', 'Verify', '-Json') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
+          if ($process.ExitCode -eq 0) { throw 'Failed Verify unexpectedly returned exit code 0.' }
+          $verification = Get-Content -LiteralPath $stdout -Raw | ConvertFrom-Json
+          if ($verification.Passed -ne $false) { throw 'Failed Verify did not emit parseable JSON with Passed=false.' }
+          if ((Get-Content -LiteralPath $stderr -Raw) -notmatch 'verification failed') { throw 'Failed Verify did not emit the expected failure reason.' }
+      - name: Launcher from PowerShell 7
+        shell: pwsh
+        run: cmd.exe /d /c Start-CTyunTrim.cmd -Mode Audit -Json
+      - name: Destructive mode rejects PowerShell 7
+        shell: pwsh
+        run: |
+          try {
+            .\CTyunTrim.ps1 -Mode Apply -Force | Out-Null
+            throw 'Apply unexpectedly accepted PowerShell 7.'
+          }
+          catch {
+            if ($_.Exception.Message -notmatch 'Windows PowerShell 5\.1 Desktop Edition') { throw }
+          }

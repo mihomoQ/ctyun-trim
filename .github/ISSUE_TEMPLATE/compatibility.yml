@@ -1,0 +1,33 @@
+name: Compatibility report
+description: Report a sanitized CTyun image or interoperability problem.
+title: "[Compatibility]: "
+labels: [compatibility]
+body:
+  - type: checkboxes
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I used a disposable snapshot and did not upload credentials, complete registry exports, system images or quarantined binaries.
+          required: true
+  - type: input
+    attributes:
+      label: CTyunTrim version
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Windows edition and build
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Sanitized observations
+      description: Include exact service/task names, paths, versions and signatures after removing usernames, hostnames and network identifiers.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Manual interoperability results
+      description: Reconnect, input, display, clipboard, ordinary file transfer, audio, network and reboot results.
+    validations:
+      required: true

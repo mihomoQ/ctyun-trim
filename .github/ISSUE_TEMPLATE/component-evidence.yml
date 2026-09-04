@@ -1,0 +1,28 @@
+name: Component evidence
+description: Propose a new preserve or removal rule with reproducible evidence.
+title: "[Component]: "
+labels: [evidence]
+body:
+  - type: input
+    attributes:
+      label: Exact object identity
+      description: Service, task, file, driver or registry value name.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Path, signature and version
+      description: Provide sanitized exact paths, ImagePath/Action, Authenticode result, publisher and version.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Behavioral evidence
+      description: Process/module relationship, logs and before/after reboot A/B results.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Rollback and risk
+    validations:
+      required: true
