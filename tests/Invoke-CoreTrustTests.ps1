@@ -276,6 +276,84 @@ Assert-CTCoreTrust -Condition $healthWiring.ResumePostCertificateDegradation.Hea
 Assert-CTCoreTrust -Condition (-not $healthWiring.ResumePendingCertificate.Healthy) -Message 'Test-CTCoreHealth accepted trust degradation for a write-ahead Pending certificate operation.'
 Assert-CTCoreTrust -Condition (-not $healthWiring.ResumeUnknownCertificate.Healthy) -Message 'Test-CTCoreHealth accepted trust degradation for an unknown completed certificate target.'
 
+Import-Module -Name $modulePath -Force
+$module = Get-Module CTyunTrim
+$preflightRegression = & $module {
+    param($FixtureManifest)
+
+    $script:PreflightFixtureGuardMode = 'Absent'
+    $script:PreflightFixtureGuardImage = [string]$FixtureManifest.ExecutionGuards[0]
+    function Test-CTCoreHealth {
+        param([hashtable]$Manifest, [switch]$RequireRunning, [PSObject]$Context)
+        [PSCustomObject]@{ Healthy = $true; Failures = @() }
+    }
+    function Test-CTPathHasReparsePoint { param([string]$Path) return $false }
+    function Test-CTSecureSourcePath { param([string]$Path) return $true }
+    function Get-CTServiceByName { param([string]$Name, [switch]$Driver) return $null }
+    function Get-CTIfEOState {
+        param([string]$Image)
+        $present = $script:PreflightFixtureGuardMode -eq 'Conflict' -or
+            ($script:PreflightFixtureGuardMode -eq 'PendingOwned' -and $Image -eq $script:PreflightFixtureGuardImage)
+        [PSCustomObject]@{
+            Present = $present
+            Debugger = if ($script:PreflightFixtureGuardMode -eq 'Conflict') { 'C:\Unrelated\debugger.exe' } elseif ($present) { $script:GuardDebugger } else { $null }
+            Marker = $null
+            RunId = $null
+        }
+    }
+    function Get-CTRunValue { param([hashtable]$Entry, [switch]$Strict) return $null }
+    function Get-CTWsusPolicySignature {
+        param([hashtable]$Manifest)
+        [PSCustomObject]@{ Classification = 'Absent'; States = @() }
+    }
+    function Get-ScheduledTask { [CmdletBinding()] param() return @() }
+    function Get-LocalUser { [CmdletBinding()] param() return @() }
+    function Get-CimInstance { [CmdletBinding()] param([string]$ClassName) return @() }
+    function Get-ChildItem { [CmdletBinding()] param([string]$Path) return @() }
+
+    $initial = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs'
+    $script:PreflightFixtureGuardMode = 'Conflict'
+    $guardConflict = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs'
+    $script:PreflightFixtureGuardMode = 'PendingOwned'
+    $pendingRunId = '20260904-233000-1234abcd'
+    $pendingGuard = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -RunId $pendingRunId -Context ([PSCustomObject]@{
+        RunId = $pendingRunId
+        Operations = @([PSCustomObject]@{
+            Type = 'ExecutionGuard'
+            Status = 'Pending'
+            Target = $script:PreflightFixtureGuardImage
+            Data = @{ RunId = $pendingRunId }
+        })
+    })
+    $script:PreflightFixtureGuardMode = 'Absent'
+    $machineSid = 'S-1-5-21-1-2-3'
+    $archivedIdentity = Test-CTApplyPreflight -Manifest $FixtureManifest -BackupRoot 'C:\ProgramData\CTyunTrim\Runs' -Context ([PSCustomObject]@{
+        MachineSid = $machineSid
+        Operations = @([PSCustomObject]@{
+            Type = 'CloudbaseIdentityEvidence'
+            Status = 'Completed'
+            Data = @{
+                State = 'AbsentAtBaseline'
+                MachineSid = $machineSid
+                CloudbaseRoot = $FixtureManifest.Roots.Cloudbase
+                AccountSid = $null
+                ProfileSid = $null
+            }
+        })
+    })
+    [PSCustomObject]@{
+        Initial = $initial
+        GuardConflict = $guardConflict
+        PendingGuard = $pendingGuard
+        ArchivedIdentity = $archivedIdentity
+    }
+} $manifest
+Assert-CTCoreTrust -Condition $preflightRegression.Initial.Passed -Message "Initial preflight with empty context collections failed: $($preflightRegression.Initial.Errors -join '; ')"
+Assert-CTCoreTrust -Condition (-not $preflightRegression.GuardConflict.Passed) -Message 'Preflight accepted an existing unknown execution guard.'
+Assert-CTCoreTrust -Condition (@($preflightRegression.GuardConflict.Errors | Where-Object { $_ -match 'Existing unknown or differently owned IFEO' }).Count -gt 0) -Message 'Execution-guard regression test did not reach the intended conflict check.'
+Assert-CTCoreTrust -Condition $preflightRegression.PendingGuard.Passed -Message "Preflight failed with exactly one owned pending guard: $($preflightRegression.PendingGuard.Errors -join '; ')"
+Assert-CTCoreTrust -Condition $preflightRegression.ArchivedIdentity.Passed -Message "Preflight failed with exactly one archived Cloudbase identity record: $($preflightRegression.ArchivedIdentity.Errors -join '; ')"
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ }
     exit 1
