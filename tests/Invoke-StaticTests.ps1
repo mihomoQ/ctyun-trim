@@ -318,3 +318,4 @@ if ($failures.Count -gt 0) {
 
 Write-Host "All $($powerShellFiles.Count) PowerShell files parsed under 64-bit Windows PowerShell $($PSVersionTable.PSVersion)."
 Write-Host "Manifest and $($plan.Count) planned actions passed static safety checks."
+exit 0
