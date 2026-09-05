@@ -7,6 +7,8 @@ CTyunTrim and ReviOS solve different problems:
 
 Keep them separate so that an update or failure can be attributed correctly.
 
+If ReviOS is already applied and the original CTyun components remain verifiable, use the single-command quick start in [README](../README.en.md#quick-start). If you need to prepare the vendor image before applying ReviOS, follow the staged order below and keep the same RunId. Detailed commands are available in the [usage manual (Chinese)](USAGE.md#与-revios-分阶段使用).
+
 Recommended order:
 
 ```text
