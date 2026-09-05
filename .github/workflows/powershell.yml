@@ -42,12 +42,15 @@ jobs:
       - name: Runtime metadata classification tests
         shell: powershell
         run: .\tests\Invoke-RuntimeDataTests.ps1
+      - name: Start-menu power options tests
+        shell: powershell
+        run: .\tests\Invoke-PowerMenuTests.ps1
       - name: Build release and verify checksum
         shell: powershell
         run: |
-          .\build\Build-Release.ps1 -Version 0.1.7-Diagnostic | Out-Null
-          $archive = '.\artifacts\CTyunTrim-0.1.7-Diagnostic.zip'
-          $checksum = '.\artifacts\CTyunTrim-0.1.7-Diagnostic.zip.sha256'
+          .\build\Build-Release.ps1 -Version 0.1.8-Diagnostic | Out-Null
+          $archive = '.\artifacts\CTyunTrim-0.1.8-Diagnostic.zip'
+          $checksum = '.\artifacts\CTyunTrim-0.1.8-Diagnostic.zip.sha256'
           if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $checksum)) { throw 'Release outputs are missing.' }
           $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
@@ -56,7 +59,7 @@ jobs:
         shell: powershell
         run: |
           $destination = Join-Path $env:RUNNER_TEMP 'CTyunTrim Diagnostic Extracted'
-          Expand-Archive -LiteralPath '.\artifacts\CTyunTrim-0.1.7-Diagnostic.zip' -DestinationPath $destination
+          Expand-Archive -LiteralPath '.\artifacts\CTyunTrim-0.1.8-Diagnostic.zip' -DestinationPath $destination
           Push-Location $destination
           try {
             .\tests\Invoke-StaticTests.ps1
@@ -69,6 +72,7 @@ jobs:
             .\tests\Invoke-TrimWorkflowTests.ps1
             .\tests\Invoke-ProcessStopTests.ps1
             .\tests\Invoke-RuntimeDataTests.ps1
+            .\tests\Invoke-PowerMenuTests.ps1
           }
           finally { Pop-Location }
       - name: Audit smoke test on a non-CTyun runner

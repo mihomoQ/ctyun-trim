@@ -3,7 +3,8 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.7-Diagnostic'
+$script:CTyunTrimVersion = '0.1.8-Diagnostic'
+. (Join-Path $PSScriptRoot 'PowerMenu.ps1')
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -1266,6 +1267,7 @@ function Get-CTPlan {
         $actions.Add([PSCustomObject]@{ Type = 'ExecutionGuard'; Target = $image; Action = 'Ensure IFEO guard' })
     }
     $actions.Add([PSCustomObject]@{ Type = 'LocalPolicy'; Target = 'CTyun fake WSUS'; Action = 'Back up LocalGPO and clear five exact values with Microsoft-signed LGPO.exe' })
+    $actions.Add([PSCustomObject]@{ Type = 'PowerMenu'; Target = 'Start-menu shutdown/restart'; Action = 'Back up and clear only existing DWORD-1 NoClose/HidePowerOptions restrictions; preserve other shell policies' })
     foreach ($task in $Manifest.ScheduledTasks) {
         $actions.Add([PSCustomObject]@{ Type = 'ScheduledTask'; Target = "$($task.TaskPath)$($task.Name)"; Action = "Export and unregister only if its sole action is exactly $($task.ExpectedImage)" })
     }
@@ -5984,6 +5986,8 @@ function Invoke-CTApply {
         }
         Remove-CTKnownCertificates -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTFirewallRules -Context $context -Manifest $Manifest -Caller $Caller
+        $powerMenu = Invoke-CTPowerMenuRestore -Caller $Caller
+        if (-not $powerMenu.Passed) { throw 'Power-menu repair was not applied; Apply is incomplete.' }
 
         $after = Get-CTyunTrimInventory -ManifestPath $context.ManifestPath
         $afterPath = Join-Path $context.Root 'reports\after.json'
@@ -6020,6 +6024,7 @@ function Invoke-CTApply {
             RebootNeeded  = $context.RebootNeeded
             WarningCount  = $context.Warnings.Count
             Warnings      = @($context.Warnings)
+            PowerMenu     = $powerMenu
             NextCommand   = if ($context.RebootNeeded) { ".\CTyunTrim.ps1 -Mode Apply -RunId $($context.RunId) -Force" } else { ".\CTyunTrim.ps1 -Mode Verify -RunId $($context.RunId)" }
         }
     }
@@ -6380,4 +6385,4 @@ function Invoke-CTyunTrim {
     }
 }
 
-Export-ModuleMember -Function Get-CTyunTrimInventory, Test-CTyunTrimManifest, Invoke-CTyunTrim, Start-CTyunTrimDiagnosticCapture, Stop-CTyunTrimDiagnosticCapture, New-CTyunTrimDiagnosticBundle
+Export-ModuleMember -Function Get-CTyunTrimInventory, Test-CTyunTrimManifest, Invoke-CTyunTrim, Start-CTyunTrimDiagnosticCapture, Stop-CTyunTrimDiagnosticCapture, New-CTyunTrimDiagnosticBundle, Restore-CTyunTrimPowerMenu

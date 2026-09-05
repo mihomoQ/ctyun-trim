@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8-Diagnostic - 2026-09-05
+
+- Added Start-menu shutdown/restart visibility repair for the observed OEM machine `NoClose` restriction, current-user `NoClose`, and machine `HidePowerOptions`. Only existing DWORD values equal to 1 are changed to 0.
+- Apply includes the repair. `Restore-PowerMenu.cmd -Force` also works independently on already-trimmed systems without reopening or modifying the cleanup journal; completed Trim remains verification-only.
+- A separate protected, unique before-value backup is created before any write. Missing/zero values are unchanged; repeated clean runs do not create new backups. Unsupported types, active managed Start CSP restrictions, and power-menu entries in Local Group Policy are not blindly overridden.
+- Preserved other Explorer/ReviOS settings, power plans, account privileges, PolicyManager defaults, and core services. No automatic shutdown, reboot, or Explorer termination is performed.
+- Added Windows PowerShell 5.1 regression coverage and release-package/CI integration.
+
 ## 0.1.7-Diagnostic - 2026-09-05
 
 - Added `Trim.cmd -Force`: automatically chains the first Prepare/Apply and resumes only one trusted local run; an already-applied run is verified without replaying cleanup. Ambiguous or damaged histories are not guessed.

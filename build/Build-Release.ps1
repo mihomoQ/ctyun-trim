@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$')]
-    [string]$Version = '0.1.7-Diagnostic'
+    [string]$Version = '0.1.8-Diagnostic'
 )
 
 Set-StrictMode -Version 2.0
@@ -137,6 +137,7 @@ $allowedReleaseFiles = @(
     'DISCLAIMER.md',
     'docs/COMPONENTS.md',
     'docs/DIAGNOSTICS.md',
+    'docs/POWER-MENU.md',
     'docs/RECOVERY.md',
     'docs/REFERENCE-BASELINE.md',
     'docs/REVIOS.md',
@@ -144,9 +145,12 @@ $allowedReleaseFiles = @(
     'docs/TEST-RESULTS-0.1.7.md',
     'LICENSE',
     'README.md',
+    'Restore-PowerMenu.cmd',
+    'Restore-PowerMenu.ps1',
     'SECURITY.md',
     'src/CTyunTrim.psd1',
     'src/CTyunTrim.psm1',
+    'src/PowerMenu.ps1',
     'Start-CTyunTrim.cmd',
     'Trim.cmd',
     'tests/Invoke-CoreTrustTests.ps1',
@@ -159,6 +163,7 @@ $allowedReleaseFiles = @(
     'tests/Invoke-TrimWorkflowTests.ps1',
     'tests/Invoke-ProcessStopTests.ps1',
     'tests/Invoke-RuntimeDataTests.ps1',
+    'tests/Invoke-PowerMenuTests.ps1',
     'tools/Get-CTCloudbaseOccupancy.ps1',
     'tools/README.md'
 )

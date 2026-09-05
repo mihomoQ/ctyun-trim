@@ -1,11 +1,13 @@
 # CTyunTrim
 
+0.1.8 新增恢复开始菜单关机/重启选项：后续 Apply 会自动处理；已经精简完成的系统运行 `Restore-PowerMenu.cmd -Force` 即可，不重做精简。详见 [电源菜单修复](docs/POWER-MENU.md)。
+
 CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerShell 5.1 工具，用于缩减天翼云电脑 Windows 预装镜像中的客体侧附加管理面，同时保留已经验证的远程互通核心。
 
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.7-Diagnostic**。针对已记录的 Windows 11/ReviOS 与天翼组件组合，保持已验证互通核心；其他镜像需要先核验。
+当前状态：**Experimental / 0.1.8-Diagnostic**。针对已记录的 Windows 11/ReviOS 与天翼组件组合，保持已验证互通核心；其他镜像需要先核验。
 
 0.1.7 已在用户提供初始快照的原厂＋ReviOS 系统上完成完整精简、三次重启、幂等与负向验证；用户确认重连、键鼠、双向文本剪贴板和普通 TXT/ZIP 互传正常。范围与限制见 [实机测试记录](docs/TEST-RESULTS-0.1.7.md)。
 
