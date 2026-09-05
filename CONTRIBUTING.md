@@ -46,5 +46,5 @@ Test fixtures and Issues must not contain real credentials or unsanitized machin
 
 ## Release notes
 
-Use the Chinese, user-facing categories and publishing workflow in [the release guide](docs/RELEASING.md).
+Use the user-facing categories and publishing workflow in [the release guide](docs/RELEASING.md). Provide complete, equivalent Chinese and English notes, with Chinese shown by default and English in a collapsible section.
 Keep each version's published body in `docs/releases/<version>.md`; tutorials and test reports do not belong in the release body.
