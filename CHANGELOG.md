@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Changed the project license to GNU GPL version 3 only (`GPL-3.0-only`). Existing release tags and archives retain their original license files.
+- Changed the development-source license to GNU GPL version 3 only (`GPL-3.0-only`) in [8451da3](https://github.com/mihomoQ/ctyun-trim/commit/8451da329e315ffb62e0704b686857d509ac8c90).
+- Releases up to and including v0.1.8 were distributed under the MIT License and retain their original license files. Existing release tags and archives are unchanged; the first GPL-licensed release has not yet been published.
 
 ## 0.1.8-Diagnostic - 2026-09-05
 

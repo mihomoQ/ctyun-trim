@@ -100,4 +100,7 @@ Component evidence, test feedback, and improvements are welcome. Read the [contr
 
 This project is not affiliated with or endorsed by CTyun, ReviOS, AME, or related parties. Preserving vendor components means only that they are functionally required; it is not a statement that they are safe or trustworthy. This tool also cannot constrain the cloud platform's control over virtual machines, disks, snapshots, or networks. See the [disclaimer](DISCLAIMER.md).
 
-Licensed under the [GNU General Public License v3.0](LICENSE), version 3 only (`GPL-3.0-only`). Historical release archives retain their included licenses.
+- **Releases up to and including v0.1.8** were distributed under the [MIT License](https://github.com/mihomoQ/ctyun-trim/blob/v0.1.8-diagnostic/LICENSE).
+- **Current development sources** are licensed under the [GNU General Public License v3.0](LICENSE), version 3 only (`GPL-3.0-only`).
+
+Earlier releases retain their original licenses. The first GPL-licensed release will be identified when it is published.

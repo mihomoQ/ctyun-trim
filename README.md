@@ -100,4 +100,7 @@ CTyunTrim 用于精简天翼云电脑 Windows 预装镜像中已识别的管理�
 
 本项目与天翼云、ReviOS、AME 等相关方无隶属或认可关系。保留厂商组件仅表示功能需要，不代表其安全可信；本工具也无法约束云平台对虚拟机、磁盘、快照和网络的控制。详见[免责声明](DISCLAIMER.md)。
 
-采用 [GNU General Public License v3.0](LICENSE)，仅限第 3 版（`GPL-3.0-only`）。历史发布包保留各自附带的许可证。
+- **v0.1.8 及以前的已发布版本**：采用 [MIT License](https://github.com/mihomoQ/ctyun-trim/blob/v0.1.8-diagnostic/LICENSE)。
+- **当前开发分支**：采用 [GNU General Public License v3.0](LICENSE)，仅限第 3 版（`GPL-3.0-only`）。
+
+历史版本保留原许可证；首个采用 GPL 的发布版本会在发布时明确标注。
