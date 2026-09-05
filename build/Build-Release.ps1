@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$')]
-    [string]$Version = '0.1.4-Diagnostic'
+    [string]$Version = '0.1.5-Diagnostic'
 )
 
 Set-StrictMode -Version 2.0
@@ -148,8 +148,12 @@ $allowedReleaseFiles = @(
     'src/CTyunTrim.psm1',
     'Start-CTyunTrim.cmd',
     'tests/Invoke-CoreTrustTests.ps1',
+    'tests/Invoke-CloudbaseOccupancyTests.ps1',
+    'tests/Invoke-CloudbaseQuiesceTests.ps1',
     'tests/Invoke-DiagnosticTests.ps1',
     'tests/Invoke-StaticTests.ps1',
+    'tests/Invoke-TaskBackupTests.ps1',
+    'tools/Get-CTCloudbaseOccupancy.ps1',
     'tools/README.md'
 )
 

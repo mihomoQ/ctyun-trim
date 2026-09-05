@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.4-Diagnostic'
+$script:CTyunTrimVersion = '0.1.5-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -1272,6 +1272,7 @@ function Get-CTPlan {
     foreach ($process in $Manifest.Processes) {
         $actions.Add([PSCustomObject]@{ Type = 'ProcessStop'; Target = $process; Action = 'Stop only when the executable is inside an approved removal directory' })
     }
+    $actions.Add([PSCustomObject]@{ Type = 'ServiceQuiesce'; Target = 'cloudbase-init'; Action = 'On a resumed Apply only, conditionally back up and disable the exact stopped auto-start service, then require reboot' })
     foreach ($entry in $Manifest.RunValues) {
         $actions.Add([PSCustomObject]@{ Type = 'RunValue'; Target = "$($entry.Hive)\$($entry.Key)::$($entry.Name)"; Action = 'Export and remove if value is CTyun-owned' })
     }
@@ -1395,6 +1396,7 @@ function Get-CTDiagnosticTargetId {
         'LocalUser' { return 'CloudbaseIdentity:Account' }
         'UserProfile' { return 'CloudbaseIdentity:Profile' }
         'CloudbaseIdentityEvidence' { return 'CloudbaseIdentity:Evidence' }
+        'ServiceQuiesce' { return 'Service:cloudbase-init' }
         'Baseline' { return 'Run:Baseline' }
         'FirewallRule' { return 'Firewall:CloudUpdateJre' }
         'NativeCommand' {
@@ -1483,7 +1485,7 @@ function Get-CTDiagnosticInventoryView {
         }
     }
     $removalServices = foreach ($service in @($Inventory.RemovalServices)) {
-        [PSCustomObject]@{ Id = "Service:$($service.Name)"; Present = [bool]$service.Present; State = Get-CTDiagnosticEnumValue -Value ([string]$service.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending'); PathExpected = [bool]$service.PathExpected }
+        [PSCustomObject]@{ Id = "Service:$($service.Name)"; Present = [bool]$service.Present; State = Get-CTDiagnosticEnumValue -Value ([string]$service.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending'); StartMode = Get-CTDiagnosticEnumValue -Value ([string]$service.StartMode) -Allowed @('Auto', 'Manual', 'Disabled'); PathExpected = [bool]$service.PathExpected }
     }
     $removalDrivers = foreach ($driver in @($Inventory.RemovalDrivers)) {
         [PSCustomObject]@{ Id = "Driver:$($driver.Name)"; Present = [bool]$driver.Present; State = Get-CTDiagnosticEnumValue -Value ([string]$driver.State) -Allowed @('Running', 'Stopped', 'Paused', 'Start Pending', 'Stop Pending'); PathExpected = [bool]$driver.PathExpected }
@@ -1521,6 +1523,9 @@ function Get-CTDiagnosticInventoryView {
     $cloudbaseHiveMountedCount = @($exactCloudbaseProfiles | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.SID) -and (Test-Path -LiteralPath ("Registry::HKEY_USERS\$([string]$_.SID)"))
     }).Count
+    $cloudbaseClassesHiveMountedCount = @($exactCloudbaseProfiles | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.SID) -and (Test-Path -LiteralPath ("Registry::HKEY_USERS\$([string]$_.SID)_Classes"))
+    }).Count
     $accountProfileSidMatches = if ($null -ne $cloudbaseAccount -and $exactCloudbaseProfiles.Count -eq 1) {
         [string]::Equals([string]$cloudbaseAccount.SID, [string]$exactCloudbaseProfiles[0].SID, [StringComparison]::OrdinalIgnoreCase)
     }
@@ -1545,6 +1550,7 @@ function Get-CTDiagnosticInventoryView {
         CloudbaseProfileLoadedCount = @($exactCloudbaseProfiles | Where-Object { [bool]$_.Loaded }).Count
         CloudbaseProfileSpecialCount = @($exactCloudbaseProfiles | Where-Object { [bool]$_.Special }).Count
         CloudbaseProfileHiveMountedCount = $cloudbaseHiveMountedCount
+        CloudbaseProfileClassesHiveMountedCount = $cloudbaseClassesHiveMountedCount
         CloudbaseUnexpectedProfileCount = $unexpectedCloudbaseProfileCount
         CloudbaseAccountProfileIdentityMatches = $accountProfileSidMatches
         CloudbaseCurrentIdentityMatches = $currentIdentityMatches
@@ -1575,7 +1581,7 @@ function Get-CTDiagnosticContextView {
         return [PSCustomObject]@{ Bound = $false; Status = 'Stateless'; RebootNeeded = $false; OperationCount = 0; PendingCount = 0; Operations = @(); Issues = @() }
     }
     $operations = New-Object Collections.Generic.List[object]
-    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence')
+    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'ServiceQuiesce', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence')
     $index = 0
     foreach ($operation in @($Context.Operations) | Select-Object -First 1000) {
         $index++
@@ -1624,7 +1630,7 @@ function Get-CTDiagnosticEventView {
 
     $events = New-Object Collections.Generic.List[object]
     $allowedStages = @('Invocation', 'Manifest', 'RunContext', 'Operation', 'Confirmation', 'Preflight', 'NativeCommand', 'Apply', 'Prepare', 'Verification', 'Journal')
-    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence', 'NativeCommand')
+    $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'ServiceQuiesce', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence', 'NativeCommand')
     $index = 0
     foreach ($event in @($script:DiagnosticEvents) | Select-Object -First 2000) {
         $index++
@@ -1894,17 +1900,19 @@ function New-CTyunTrimDiagnosticBundle {
             })
         }
 
+        $lastQuiesceCandidate = Get-CTPropertyValue -InputObject $script:LastPreflightResult -Name 'CloudbaseServiceQuiesceCandidate'
         $preflightView = if ($null -ne $script:LastPreflightResult -and $validation.Valid) {
             [PSCustomObject]@{
                 Ran          = $true
                 Passed       = [bool]$script:LastPreflightResult.Passed
+                CloudbaseServiceQuiesceCandidate = [bool]($lastQuiesceCandidate -is [bool] -and $lastQuiesceCandidate)
                 ErrorCount   = @($script:LastPreflightResult.Errors).Count
                 WarningCount = @($script:LastPreflightResult.Warnings).Count
                 Errors       = @(Get-CTDiagnosticIssueView -Messages @($script:LastPreflightResult.Errors) -Manifest $manifest)
                 Warnings     = @(Get-CTDiagnosticIssueView -Messages @($script:LastPreflightResult.Warnings) -Manifest $manifest)
             }
         }
-        else { [PSCustomObject]@{ Ran = $false; Passed = $null; ErrorCount = 0; WarningCount = 0; Errors = @(); Warnings = @() } }
+        else { [PSCustomObject]@{ Ran = $false; Passed = $null; CloudbaseServiceQuiesceCandidate = $false; ErrorCount = 0; WarningCount = 0; Errors = @(); Warnings = @() } }
 
         $contextView = if ($validation.Valid) { Get-CTDiagnosticContextView -Context $context -Manifest $manifest } else { [PSCustomObject]@{ Bound = $false; Status = 'Stateless'; RebootNeeded = $false; OperationCount = 0; PendingCount = 0; Operations = @(); Issues = @() } }
         $eventView = if ($validation.Valid) { @(Get-CTDiagnosticEventView -Manifest $manifest) } else { @() }
@@ -2436,6 +2444,11 @@ function Resolve-CTPendingOperations {
             }
             'Service' {
                 $completed = $null -eq (Get-CTServiceByName -Name ([string]$operation.Target))
+            }
+            'ServiceQuiesce' {
+                $quiesceState = Get-CTCloudbaseServiceQuiesceState -Context $Context -Manifest $Manifest -Operation $operation
+                $completed = [string]$quiesceState.Service.State -eq 'Stopped' -and
+                    [string]$quiesceState.Service.StartMode -eq 'Disabled'
             }
             'DriverService' {
                 $completed = $null -eq (Get-CTServiceByName -Name ([string]$operation.Target) -Driver)
@@ -2978,13 +2991,22 @@ function Remove-CTScheduledTasks {
 
             $target = "$($task.TaskPath)$($task.TaskName)"
             if (Confirm-CTRequiredOperation -Caller $Caller -Target $target -Action 'Export and unregister scheduled task') {
-                $fileName = (($task.TaskPath + $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_') + '.xml'
-                $backupPath = Join-Path (Join-Path $Context.Root 'tasks') $fileName
+                $fileBase = (($task.TaskPath + $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_')
+                $backupDirectory = ConvertTo-CTFullPath -Path (Join-Path $Context.Root 'tasks')
                 $pending = Get-CTPendingOperation -Context $Context -Type 'ScheduledTask' -Target $target
                 if ($null -ne $pending) {
                     $recordedBackup = [string](Get-CTPropertyValue -InputObject $pending.Data -Name 'Backup')
                     $recordedHash = [string](Get-CTPropertyValue -InputObject $pending.Data -Name 'BackupSha256')
-                    if (-not $recordedBackup.Equals($backupPath, [StringComparison]::OrdinalIgnoreCase) -or
+                    if ([string]::IsNullOrWhiteSpace($recordedBackup)) { throw "Pending scheduled task has no backup path: $target" }
+                    $backupPath = ConvertTo-CTFullPath -Path $recordedBackup
+                    $backupLeaf = [IO.Path]::GetFileName($backupPath)
+                    $allowedName = $backupLeaf -ieq ($fileBase + '.xml') -or
+                        $backupLeaf -match ('^' + [regex]::Escape($fileBase) + '-[0-9a-fA-F]{32}\.xml$')
+                    if (-not $allowedName -or
+                        -not ([IO.Path]::GetDirectoryName($backupPath)).Equals($backupDirectory, [StringComparison]::OrdinalIgnoreCase) -or
+                        [string](Get-CTPropertyValue -InputObject $pending.Data -Name 'TaskName') -ine [string]$task.TaskName -or
+                        [string](Get-CTPropertyValue -InputObject $pending.Data -Name 'TaskPath') -ine [string]$task.TaskPath -or
+                        [string](Get-CTPropertyValue -InputObject $pending.Data -Name 'ExpectedImage') -ine [string]$entry.ExpectedImage -or
                         -not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or
                         (Test-CTPathHasReparsePoint -Path $backupPath) -or
                         -not (Test-CTSecureSourcePath -Path $backupPath) -or
@@ -2994,6 +3016,10 @@ function Remove-CTScheduledTasks {
                     $operationId = [string]$pending.Id
                 }
                 else {
+                    # A task recreated after Prepare needs a new snapshot. Never
+                    # overwrite XML authenticated by an earlier journal record.
+                    $backupPath = Join-Path $backupDirectory ($fileBase + '-' + [guid]::NewGuid().ToString('N') + '.xml')
+                    if (Test-Path -LiteralPath $backupPath) { throw "Scheduled task backup path already exists: $target" }
                     Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath | Set-Content -LiteralPath $backupPath -Encoding Unicode
                     Set-CTRunFileAcl -Path $backupPath
                     if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or
@@ -3805,6 +3831,14 @@ function Test-CTSafeCloudbaseSid {
     return $rid -ge 1000
 }
 
+function Test-CTCloudbaseUserHiveMounted {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+
+    if ([string]::IsNullOrWhiteSpace($Sid)) { return $true }
+    return (Test-Path -LiteralPath ("Registry::HKEY_USERS\$Sid")) -or
+        (Test-Path -LiteralPath ("Registry::HKEY_USERS\${Sid}_Classes"))
+}
+
 function Test-CTCloudbasePrepareProcessEvidence {
     param(
         [Parameter(Mandatory = $true)][PSObject]$Evidence,
@@ -4183,6 +4217,280 @@ function Get-CTCloudbaseIdentityReferences {
     return $references.ToArray()
 }
 
+function Get-CTCloudbaseServiceQuiesceOperation {
+    param([Parameter(Mandatory = $true)][PSObject]$Context)
+
+    $all = @($Context.Operations | Where-Object { $_.Type -eq 'ServiceQuiesce' })
+    if (@($all | Where-Object { $_.Target -ne 'cloudbase-init' }).Count -gt 0 -or $all.Count -gt 1) {
+        throw 'The run contains an ambiguous ServiceQuiesce journal history.'
+    }
+    if ($all.Count -eq 1 -and [string]$all[0].Status -notin @('Pending', 'Completed')) {
+        throw 'The ServiceQuiesce journal entry has an invalid status.'
+    }
+    if ($all.Count -eq 1) { return $all[0] }
+    return $null
+}
+
+function Test-CTCloudbaseQuiesceSupersededByRemoval {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [Parameter(Mandatory = $true)][PSObject]$QuiesceOperation
+    )
+
+    $quiesceIndex = -1
+    for ($index = 0; $index -lt $Context.Operations.Count; $index++) {
+        if ([string]$Context.Operations[$index].Id -eq [string]$QuiesceOperation.Id) { $quiesceIndex = $index; break }
+    }
+    if ($quiesceIndex -lt 0) { throw 'ServiceQuiesce operation is not part of this run history.' }
+    $removals = New-Object Collections.Generic.List[object]
+    for ($index = $quiesceIndex + 1; $index -lt $Context.Operations.Count; $index++) {
+        $operation = $Context.Operations[$index]
+        if ([string]$operation.Type -eq 'Service' -and [string]$operation.Target -eq 'cloudbase-init' -and [string]$operation.Status -eq 'Completed') {
+            $removals.Add($operation)
+        }
+    }
+    if ($removals.Count -eq 0) { return $false }
+    if ([string]$QuiesceOperation.Status -ne 'Completed') {
+        throw 'A service removal record cannot supersede a pending ServiceQuiesce operation.'
+    }
+    $entry = @($Manifest.Services | Where-Object { $_.Name -eq 'cloudbase-init' }) | Select-Object -First 1
+    if ($null -eq $entry) { throw 'The immutable cloudbase-init service entry is missing.' }
+    foreach ($operation in $removals) {
+        $backup = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Backup')
+        $backupHash = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'BackupSha256')
+        $expectedImage = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'ExpectedImage')
+        if (-not [string]::Equals($expectedImage, [string]$entry.ExpectedImage, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-CTPathWithinRoot -Path $backup -Root (Join-Path $Context.Root 'registry')) -or
+            -not (Test-CTRegistryExportFile -Path $backup -NativeKey 'HKLM\SYSTEM\CurrentControlSet\Services\cloudbase-init') -or
+            -not (Test-CTSecureSourcePath -Path $backup) -or (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $backupHash) {
+            throw 'The durable cloudbase-init removal record is not trusted.'
+        }
+    }
+    return $true
+}
+
+function Assert-CTCloudbaseQuiesceHistory {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [PSObject]$ExistingOperation
+    )
+
+    $allowedPrepareTypes = @('Baseline','CloudbaseIdentityEvidence','ExecutionGuard','ProcessStop','ScheduledTask','LocalPolicy')
+    $unexpected = @(if ($null -eq $ExistingOperation) {
+        $Context.Operations | Where-Object { [string]$_.Type -notin $allowedPrepareTypes -or [string]$_.Status -ne 'Completed' }
+    }
+    else {
+        $Context.Operations | Where-Object {
+            [string]$_.Id -ne [string]$ExistingOperation.Id -and
+            ([string]$_.Type -notin $allowedPrepareTypes -or [string]$_.Status -ne 'Completed')
+        }
+    })
+    if ($unexpected.Count -gt 0) { throw 'Service quiesce refused a run that crossed the Prepare-only mutation boundary.' }
+    $pending = @($Context.Operations | Where-Object { $_.Status -eq 'Pending' })
+    if (($null -eq $ExistingOperation -and $pending.Count -ne 0) -or
+        ($null -ne $ExistingOperation -and ($pending.Count -gt 1 -or ($pending.Count -eq 1 -and [string]$pending[0].Id -ne [string]$ExistingOperation.Id)))) {
+        throw 'Service quiesce found an unrelated pending operation.'
+    }
+}
+
+function Get-CTCloudbaseServiceQuiesceState {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [PSObject]$Operation
+    )
+
+    $evidenceEntries = @($Context.Operations | Where-Object {
+        $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed'
+    })
+    if ($evidenceEntries.Count -ne 1) { throw 'Service quiesce requires one trusted Cloudbase identity evidence record.' }
+    $evidence = Save-CTCloudbaseIdentityEvidence -Context $Context -Manifest $Manifest
+    if ([string](Get-CTPropertyValue -InputObject $evidence.Data -Name 'State') -ne 'PresentAtBaseline') {
+        throw 'Service quiesce requires a present-at-baseline Cloudbase identity.'
+    }
+    $accountSid = [string](Get-CTPropertyValue -InputObject $evidence.Data -Name 'AccountSid')
+    $profileSid = [string](Get-CTPropertyValue -InputObject $evidence.Data -Name 'ProfileSid')
+    if ([string]::IsNullOrWhiteSpace($accountSid) -or [string]::IsNullOrWhiteSpace($profileSid) -or
+        -not [string]::Equals($accountSid, $profileSid, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-CTSafeCloudbaseSid -Sid $accountSid -MachineSid ([string]$Context.MachineSid))) {
+        throw 'Service quiesce identity SIDs do not match the trusted local baseline.'
+    }
+
+    $accounts = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.SID -eq $accountSid })
+    if ($accounts.Count -ne 1 -or [string]$accounts[0].Name -ne 'cloudbase-init' -or -not [bool]$accounts[0].Enabled) {
+        throw 'Service quiesce requires the one enabled archived cloudbase-init account.'
+    }
+    if ([string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -eq $accountSid) {
+        throw 'Service quiesce cannot run as the archived Cloudbase identity.'
+    }
+    $profiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $accountSid })
+    if ($profiles.Count -ne 1 -or [string]$profiles[0].LocalPath -ine 'C:\Users\cloudbase-init' -or
+        [bool]$profiles[0].Special -or (Test-CTPathHasReparsePoint -Path ([string]$profiles[0].LocalPath))) {
+        throw 'Service quiesce requires one exact, non-Special Cloudbase Profile.'
+    }
+    if (@(Get-CTProcessesByOwnerSid -Sid $accountSid).Count -ne 0) {
+        throw 'Service quiesce refused while a process runs under the archived Cloudbase SID.'
+    }
+
+    $entries = @($Manifest.Services | Where-Object { $_.Name -eq 'cloudbase-init' })
+    if ($entries.Count -ne 1) { throw 'Service quiesce requires the immutable cloudbase-init service entry.' }
+    $entry = $entries[0]
+    $service = Get-CTServiceByName -Name 'cloudbase-init'
+    if ($null -eq $service -or -not (Test-CTExpectedService -Service $service -ExpectedImage $entry.ExpectedImage)) {
+        throw 'Service quiesce requires the exact cloudbase-init service image.'
+    }
+    if ([string]$service.State -ne 'Stopped' -or [string]$service.StartMode -notin @('Auto', 'Disabled') -or
+        -not [string]::Equals((Resolve-CTAccountSid -Identity ([string]$service.StartName)), $accountSid, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Service quiesce requires a stopped Auto or Disabled service owned by the archived SID.'
+    }
+    $image = Get-CTImageExecutable -PathName ([string]$service.PathName)
+    if (-not [string]::Equals((ConvertTo-CTFullPath -Path $image), (ConvertTo-CTFullPath -Path ([string]$entry.ExpectedImage)), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Service quiesce image path changed during validation.'
+    }
+    $fileEvidence = Get-CTCoreFileEvidence -Path $image
+    if ([string]$fileEvidence.SignatureStatus -ne 'Valid' -or $fileEvidence.SecureSource -isnot [bool] -or
+        -not [bool]$fileEvidence.SecureSource -or [string]::IsNullOrWhiteSpace([string]$fileEvidence.SignerThumbprint)) {
+        throw 'Service quiesce image signature or source ACL is not trusted.'
+    }
+    $coreHealth = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -Context $Context
+    if (-not $coreHealth.Healthy) { throw "Service quiesce core baseline check failed: $($coreHealth.Failures -join '; ')" }
+
+    if ($null -ne $Operation) {
+        $backup = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'Backup')
+        $backupHash = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'BackupSha256')
+        $recordedSid = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'SID')
+        $recordedImage = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'ExpectedImage')
+        $recordedImageHash = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'ImageSha256')
+        $registryRoot = Join-Path $Context.Root 'registry'
+        if ([string]$Operation.Type -ne 'ServiceQuiesce' -or [string]$Operation.Target -ne 'cloudbase-init' -or
+            $recordedSid -ne $accountSid -or -not [string]::Equals($recordedImage, [string]$entry.ExpectedImage, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($recordedImageHash, [string]$fileEvidence.FileSha256, [StringComparison]::OrdinalIgnoreCase) -or
+            [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'StartMode') -ne 'Auto' -or
+            [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'State') -ne 'Stopped' -or
+            -not (Test-CTPathWithinRoot -Path $backup -Root $registryRoot) -or -not (Test-CTRegistryExportFile -Path $backup -NativeKey 'HKLM\SYSTEM\CurrentControlSet\Services\cloudbase-init') -or
+            -not (Test-CTSecureSourcePath -Path $backup) -or (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $backupHash -or
+            [string]::IsNullOrWhiteSpace([string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'QuiescedBoot'))) {
+            throw 'ServiceQuiesce journal identity or backup validation failed.'
+        }
+    }
+
+    $hiveMounted = Test-Path -LiteralPath ("Registry::HKEY_USERS\$accountSid")
+    $classesHiveMounted = Test-Path -LiteralPath ("Registry::HKEY_USERS\${accountSid}_Classes")
+    return [PSCustomObject]@{
+        AccountSid = $accountSid
+        Entry = $entry
+        Service = $service
+        ProfileLoaded = [bool]$profiles[0].Loaded
+        HiveMounted = $hiveMounted
+        ClassesHiveMounted = $classesHiveMounted
+        FileSha256 = [string]$fileEvidence.FileSha256
+    }
+}
+
+function Set-CTCloudbaseQuiescePendingReboot {
+    param([Parameter(Mandatory = $true)][PSObject]$Context)
+
+    $message = 'The exact cloudbase-init service startup is disabled; reboot before resuming Apply with this RunId.'
+    $Context.RebootNeeded = $true
+    $Context.Status = 'PendingReboot'
+    $Context.CompletedAt = (Get-Date).ToString('o')
+    if (@($Context.Warnings | Where-Object { [string]$_ -eq $message }).Count -eq 0) {
+        Add-CTWarning -Context $Context -Message $message
+    }
+    else { Save-CTRunContext -Context $Context }
+    Add-CTDiagnosticEvent -Level 'Warning' -Stage 'Apply' -Message 'Apply requires reboot.' -Data @{ Status = 'PendingReboot'; RebootNeeded = $true }
+    return [PSCustomObject]@{
+        RunId = $Context.RunId
+        Status = 'PendingReboot'
+        BackupPath = $Context.Root
+        RebootNeeded = $true
+        WarningCount = $Context.Warnings.Count
+        Warnings = @($Context.Warnings)
+        NextCommand = ".\CTyunTrim.ps1 -Mode Apply -RunId $($Context.RunId) -Force"
+    }
+}
+
+function Invoke-CTCloudbaseServiceQuiesce {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [Parameter(Mandatory = $true)][Management.Automation.PSCmdlet]$Caller
+    )
+
+    $existing = Get-CTCloudbaseServiceQuiesceOperation -Context $Context
+    Assert-CTCloudbaseQuiesceHistory -Context $Context -ExistingOperation $existing
+    $state = Get-CTCloudbaseServiceQuiesceState -Context $Context -Manifest $Manifest -Operation $existing
+    $operatingSystem = Get-CTOperatingSystem
+    $currentBoot = [string]$operatingSystem.LastBootUpTime
+    if ([string]::IsNullOrWhiteSpace($currentBoot)) { throw 'Service quiesce could not identify the current boot.' }
+    if ($null -eq $existing -and -not ($state.ProfileLoaded -or $state.HiveMounted -or $state.ClassesHiveMounted)) {
+        throw 'Cloudbase Profile is no longer loaded; rerun Apply instead of quiescing the service.'
+    }
+    if ($null -eq $existing -and [string]$state.Service.StartMode -ne 'Auto') {
+        throw 'Service quiesce refused a service that was not Automatic at the mutation boundary.'
+    }
+    if ($null -ne $existing) {
+        $recordedBoot = [string](Get-CTPropertyValue -InputObject $existing.Data -Name 'QuiescedBoot')
+        if ($recordedBoot -ne $currentBoot) {
+            throw 'Cloudbase Profile remains loaded after the ServiceQuiesce reboot; automatic retry was refused.'
+        }
+        if ([string]$existing.Status -eq 'Pending' -and [string]$state.Service.StartMode -eq 'Disabled') {
+            Complete-CTOperation -Context $Context -Id ([string]$existing.Id)
+            if ($null -eq $Context.PSObject.Properties['LastBootUpTime']) {
+                $Context | Add-Member -NotePropertyName LastBootUpTime -NotePropertyValue $currentBoot
+            }
+            else { $Context.LastBootUpTime = $currentBoot }
+            return Set-CTCloudbaseQuiescePendingReboot -Context $Context
+        }
+    }
+
+    if (-not (Confirm-CTRequiredOperation -Caller $Caller -Target 'cloudbase-init' -Action 'Back up and disable only the exact stopped service startup, then require reboot')) {
+        throw 'Service quiesce confirmation did not succeed.'
+    }
+    if ($null -eq $existing) {
+        $nativeKey = 'HKLM\SYSTEM\CurrentControlSet\Services\cloudbase-init'
+        $backupName = 'service-quiesce-cloudbase-init-' + [guid]::NewGuid().ToString('N')
+        $backup = Export-CTRegistryKey -Context $Context -NativeKey $nativeKey -Name $backupName
+        $operationId = Start-CTOperation -Context $Context -Type 'ServiceQuiesce' -Target 'cloudbase-init' -Data @{
+            Backup = [string]$backup.Path
+            BackupSha256 = [string]$backup.SHA256
+            ExpectedImage = [string]$state.Entry.ExpectedImage
+            ImageSha256 = [string]$state.FileSha256
+            SID = [string]$state.AccountSid
+            StartMode = [string]$state.Service.StartMode
+            State = [string]$state.Service.State
+            StartName = [string]$state.Service.StartName
+            QuiescedBoot = $currentBoot
+        }
+    }
+    else { $operationId = [string]$existing.Id }
+
+    $journalOperation = if ($null -eq $existing) {
+        @($Context.Operations | Where-Object { $_.Id -eq $operationId }) | Select-Object -First 1
+    }
+    else { $existing }
+    $freshState = Get-CTCloudbaseServiceQuiesceState -Context $Context -Manifest $Manifest -Operation $journalOperation
+    if ([string]$freshState.Service.State -ne 'Stopped' -or [string]$freshState.Service.StartMode -ne 'Auto' -or
+        -not [string]::Equals($freshState.FileSha256, $state.FileSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$freshState.AccountSid, [string]$state.AccountSid, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'cloudbase-init service changed at the ServiceQuiesce mutation boundary.'
+    }
+    $state = $freshState
+    Set-Service -Name 'cloudbase-init' -StartupType Disabled -ErrorAction Stop
+    $post = Get-CTCloudbaseServiceQuiesceState -Context $Context -Manifest $Manifest -Operation $journalOperation
+    if ([string]$post.Service.StartMode -ne 'Disabled' -or [string]$post.Service.State -ne 'Stopped' -or
+        -not [string]::Equals($post.FileSha256, $state.FileSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'cloudbase-init service did not reach the exact quiesced state.'
+    }
+    Complete-CTOperation -Context $Context -Id $operationId
+    if ($null -eq $Context.PSObject.Properties['LastBootUpTime']) {
+        $Context | Add-Member -NotePropertyName LastBootUpTime -NotePropertyValue $currentBoot
+    }
+    else { $Context.LastBootUpTime = $currentBoot }
+    return Set-CTCloudbaseQuiescePendingReboot -Context $Context
+}
+
 function Remove-CTCloudbaseIdentity {
     param(
         [Parameter(Mandatory = $true)]
@@ -4246,7 +4554,7 @@ function Remove-CTCloudbaseIdentity {
     if ($ownedProcesses.Count -gt 0) {
         throw 'Refusing Cloudbase identity removal while a process still runs under the archived SID.'
     }
-    if (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) {
+    if (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid) {
         throw 'Refusing Cloudbase identity removal while its user hive remains mounted.'
     }
     $references = @(Get-CTCloudbaseIdentityReferences -Sid $expectedSid)
@@ -4276,7 +4584,7 @@ function Remove-CTCloudbaseIdentity {
     }
     $profiles = @($sidProfiles | Where-Object { $_.LocalPath -ieq 'C:\Users\cloudbase-init' })
     foreach ($profile in $profiles) {
-        if ($profile.Loaded -or $profile.Special -or (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+        if ($profile.Loaded -or $profile.Special -or (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid) -or
             (Test-CTPathHasReparsePoint -Path ([string]$profile.LocalPath))) {
             throw "Refusing to remove a loaded, special or unsafe cloudbase-init Profile: $($profile.LocalPath)"
         }
@@ -4291,7 +4599,7 @@ function Remove-CTCloudbaseIdentity {
             if ($finalAccounts.Count -ne 1 -or [string]$finalAccounts[0].Name -ne 'cloudbase-init' -or
                 $finalOwnedProcesses.Count -gt 0 -or $finalSidProfiles.Count -gt 1 -or @($finalSidProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count -gt 0 -or
                 @($finalSidProfiles | Where-Object { [bool]$_.Loaded -or [bool]$_.Special }).Count -gt 0 -or
-                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid"))) {
+                (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid)) {
                 throw 'Cloudbase identity state changed before account disable; no identity object was removed.'
             }
             $account = $finalAccounts[0]
@@ -4315,7 +4623,7 @@ function Remove-CTCloudbaseIdentity {
             if ($postDisableAccounts.Count -ne 1 -or [string]$postDisableAccounts[0].Name -ne 'cloudbase-init' -or [bool]$postDisableAccounts[0].Enabled -or
                 $postDisableProcesses.Count -gt 0 -or $postDisableProfiles.Count -gt 1 -or @($postDisableProfiles | Where-Object { $_.LocalPath -ine 'C:\Users\cloudbase-init' }).Count -gt 0 -or
                 @($postDisableProfiles | Where-Object { [bool]$_.Loaded -or [bool]$_.Special }).Count -gt 0 -or
-                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid"))) {
+                (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid)) {
                 throw 'Cloudbase identity could not be proven inactive after account disable; deletion was deferred with its journal entry pending.'
             }
             $account = $postDisableAccounts[0]
@@ -4332,7 +4640,7 @@ function Remove-CTCloudbaseIdentity {
             $finalProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
             if ($boundaryProcesses.Count -gt 0 -or $finalProfiles.Count -ne 1 -or $finalProfiles[0].LocalPath -ine 'C:\Users\cloudbase-init' -or
                 [bool]$finalProfiles[0].Loaded -or [bool]$finalProfiles[0].Special -or
-                (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+                (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid) -or
                 (Test-CTPathHasReparsePoint -Path ([string]$finalProfiles[0].LocalPath))) {
                 throw 'Cloudbase Profile state changed at the deletion boundary; no Profile was removed.'
             }
@@ -4357,7 +4665,7 @@ function Remove-CTCloudbaseIdentity {
         $finalSidProfiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
         $finalAccounts = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.SID -eq $expectedSid })
         if ($finalOwnedProcesses.Count -gt 0 -or $finalSidProfiles.Count -gt 0 -or
-            (Test-Path -LiteralPath ("Registry::HKEY_USERS\$expectedSid")) -or
+            (Test-CTCloudbaseUserHiveMounted -Sid $expectedSid) -or
             $finalAccounts.Count -ne 1 -or [string]$finalAccounts[0].Name -ne 'cloudbase-init' -or [bool]$finalAccounts[0].Enabled) {
             throw 'Cloudbase identity changed before final account removal; the disabled account was preserved with its journal entry pending.'
         }
@@ -4719,6 +5027,7 @@ function Test-CTApplyPreflight {
 
     $errors = New-Object Collections.Generic.List[string]
     $warnings = New-Object Collections.Generic.List[string]
+    $cloudbaseApplyLoadedErrorCount = 0
     try { $taskSnapshot = @(Get-ScheduledTask -ErrorAction Stop) }
     catch { $taskSnapshot = @(); $errors.Add("Scheduled Task inventory failed: $($_.Exception.Message)") }
     $health = Test-CTCoreHealth -Manifest $Manifest -RequireRunning -Context $Context
@@ -4925,7 +5234,7 @@ function Test-CTApplyPreflight {
         $errors.Add('Cloudbase identity SID is associated with an unexpected or additional user Profile path.')
     }
     if (-not [string]::IsNullOrWhiteSpace($cloudbaseIdentitySid) -and
-        (Test-Path -LiteralPath ("Registry::HKEY_USERS\$cloudbaseIdentitySid")) -and
+        (Test-CTCloudbaseUserHiveMounted -Sid $cloudbaseIdentitySid) -and
         $cloudbaseProfiles.Count -eq 0) {
         $errors.Add('Cloudbase identity user hive is mounted without its one exact Profile record.')
     }
@@ -4946,13 +5255,14 @@ function Test-CTApplyPreflight {
     foreach ($profile in $cloudbaseProfiles) {
         $profileSid = [string]$profile.SID
         $hiveMounted = -not [string]::IsNullOrWhiteSpace($profileSid) -and
-            (Test-Path -LiteralPath ("Registry::HKEY_USERS\$profileSid"))
+            (Test-CTCloudbaseUserHiveMounted -Sid $profileSid)
         if ([bool]$profile.Special) {
             $errors.Add("Cloudbase profile is marked Special and cannot be handled automatically: $($profile.LocalPath)")
             continue
         }
         if ([bool]$profile.Loaded -or $hiveMounted) {
             if ($Phase -ne 'Prepare') {
+                $cloudbaseApplyLoadedErrorCount++
                 $errors.Add("Cloudbase profile is loaded or its user hive is mounted; Apply requires an unloaded profile: $($profile.LocalPath)")
                 continue
             }
@@ -5041,9 +5351,10 @@ function Test-CTApplyPreflight {
     }
 
     $result = [PSCustomObject]@{
-        Passed   = ($errors.Count -eq 0)
-        Errors   = $errors.ToArray()
-        Warnings = $warnings.ToArray()
+        Passed                           = ($errors.Count -eq 0)
+        Errors                           = $errors.ToArray()
+        Warnings                         = $warnings.ToArray()
+        CloudbaseServiceQuiesceCandidate = [bool]($Phase -eq 'Apply' -and $cloudbaseApplyLoadedErrorCount -eq 1 -and $errors.Count -eq 1)
     }
     $script:LastPreflightResult = $result
     Add-CTDiagnosticEvent -Level $(if ($result.Passed) { 'Info' } else { 'Error' }) -Stage 'Preflight' -Message $(if ($result.Passed) { 'Preflight passed.' } else { 'Preflight failed.' }) -Data @{
@@ -5120,9 +5431,41 @@ function Invoke-CTApply {
         Save-CTRunContext -Context $context
         if ($resuming) {
             Resolve-CTPendingOperations -Context $context -Manifest $Manifest
+            $quiesceOperation = Get-CTCloudbaseServiceQuiesceOperation -Context $context
+            $quiesceSuperseded = $false
+            if ($null -ne $quiesceOperation) {
+                $quiesceSuperseded = Test-CTCloudbaseQuiesceSupersededByRemoval -Context $context -Manifest $Manifest -QuiesceOperation $quiesceOperation
+                $quiescedBoot = [string](Get-CTPropertyValue -InputObject $quiesceOperation.Data -Name 'QuiescedBoot')
+                $requiresQuiesceGate = [string]$quiesceOperation.Status -eq 'Pending' -or $quiescedBoot -eq $currentBoot
+                if (-not $quiesceSuperseded) {
+                    if ($requiresQuiesceGate) { Assert-CTCloudbaseQuiesceHistory -Context $context -ExistingOperation $quiesceOperation }
+                    $quiesceState = Get-CTCloudbaseServiceQuiesceState -Context $context -Manifest $Manifest -Operation $quiesceOperation
+                    if ([string]$quiesceOperation.Status -eq 'Completed' -and [string]$quiesceState.Service.StartMode -ne 'Disabled') {
+                        throw 'Completed ServiceQuiesce journal state no longer matches the service.'
+                    }
+                    if ([string]$quiesceOperation.Status -eq 'Pending') {
+                        if ($quiescedBoot -ne $currentBoot) { throw 'A pending ServiceQuiesce operation crossed a reboot and requires manual review.' }
+                        return Invoke-CTCloudbaseServiceQuiesce -Context $context -Manifest $Manifest -Caller $Caller
+                    }
+                    if ($quiescedBoot -eq $currentBoot) { return Set-CTCloudbaseQuiescePendingReboot -Context $context }
+                    if ($quiesceState.ProfileLoaded -or $quiesceState.HiveMounted -or $quiesceState.ClassesHiveMounted) {
+                        throw 'Cloudbase Profile or user hive remains loaded after the ServiceQuiesce reboot; automatic retry was refused.'
+                    }
+                }
+            }
             $preflight = Test-CTApplyPreflight -Manifest $Manifest -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $context.RunId -Context $context -Phase Apply
             if (-not $preflight.Passed) {
+                $quiesceCandidate = Get-CTPropertyValue -InputObject $preflight -Name 'CloudbaseServiceQuiesceCandidate'
+                if ($quiesceCandidate -is [bool] -and $quiesceCandidate) {
+                    if ($null -ne $quiesceOperation -or $quiesceSuperseded) {
+                        throw 'Cloudbase Profile remains loaded after the ServiceQuiesce reboot; automatic retry was refused.'
+                    }
+                    return Invoke-CTCloudbaseServiceQuiesce -Context $context -Manifest $Manifest -Caller $Caller
+                }
                 throw "Apply resume preflight failed: $($preflight.Errors -join '; ')"
+            }
+            if ($null -ne $quiesceOperation -and [string]$quiesceOperation.Status -eq 'Pending') {
+                throw 'A pending ServiceQuiesce operation crossed a reboot and requires manual review.'
             }
         }
         if (@($context.Operations | Where-Object { $_.Type -eq 'Baseline' }).Count -eq 0) {

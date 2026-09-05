@@ -5,7 +5,7 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.4-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
+当前状态：**Experimental / 0.1.5-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
 
 ## 项目目标
 
@@ -82,6 +82,12 @@ CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 Re
 
 参考镜像可能由精确的 `TaskAgentDetect.exe` 以 `cloudbase-init` 身份挂载 Profile。Prepare 只在账户/Profile SID、安全本地 RID、服务或任务 Principal 的 SID 归属锚、进程 Owner SID、Session 0、精确任务映像路径、签名、ACL 和引用全部匹配时接受这一状态；它在变更边界复验后先建立 IFEO guard，再停止该进程并移除任务，但不会删除账户、Profile 或强制卸载 hive。Apply 仍要求 Profile 与 hive 已自然卸载，`Special=true` 或同 SID 的异常 Profile 路径在所有阶段均为硬阻断。
 
+已观察到 0.1.4 在完整重启后仍有 Profile/hive 加载、三个 `check_report_img_*` 任务重新出现的情况，即使六个 IFEO guard 仍然匹配。`Prepared` 只证明该次准备执行完成，不能证明重启后的自愈入口已经全部阻断。若遇到此情况，保持原 RunId，使用独立的 [Cloudbase 占用检查](tools/README.md#cloudbase-profile-occupancy) 补充进程、登录关联和服务/任务主体证据；不要把重复重启或放宽 Profile 删除预检当作修复。
+
+0.1.5 为这个已观察到的状态增加了受限的过渡步骤：仅在同 RunId 续跑、唯一预检错误是 Profile/hive 已加载、基线身份和互通核心有效、该 SID 没有进程，且精确 `cloudbase-init` 服务为 `Stopped / Auto` 并使用该 SID 时，Apply 才会独立备份服务配置、记录 `ServiceQuiesce` 操作并将此服务启动类型改为 `Disabled`。当次立即返回 `PendingReboot`，不会继续删除组件。账户、Profile、hive 和任务在此步骤均不修改。
+
+重启后，用 0.1.5 和原 RunId 再次运行 Apply；只有 Profile/hive 已自然卸载且所有原有预检通过，才会进入完整精简。如果停用服务并重启后仍加载，脚本继续阻断，不自动扩大停用范围。0.1.4 创建的 RunId 可直接续用，移除清单及其固定哈希未改变。进入 0.1.5 续跑后请继续使用该版本，避免旧版本无法理解新增操作记录。
+
 如果 Apply 返回 `PendingReboot`，重启后必须使用同一个 RunId 续跑，避免把一次变更拆成多个无法统一恢复的备份：
 
 ```powershell
@@ -125,7 +131,7 @@ Diagnostic 导出要求 64 位管理员 Windows PowerShell 5.1，并固定写入
 
 ### 恢复
 
-Apply 会返回 `RunId` 和备份目录。0.1.4 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
+Apply 会返回 `RunId` 和备份目录。0.1.5 暂不提供自动 Restore：安全审查确认，直接导入完整注册表键、任务或 `Registry.pol` 可能覆盖 Apply 后产生的合法变化。隔离区和导出文件用于取证式人工恢复；完整回滚必须使用运行前的云主机快照。
 
 ## 与 ReviOS 配合
 

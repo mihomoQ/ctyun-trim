@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5-Diagnostic - 2026-09-05
+
+- Added a resume-only service quiesce stage for the observed loaded Cloudbase Profile with zero SID-owned processes and the exact stopped, automatic Cloudbase service. A protected write-ahead record and separate registry backup precede disabling only that service's startup; the invocation returns `PendingReboot` without entering removal.
+- Kept Profile/account deletion behind the existing strict unloaded-profile checks. Same-boot replay cannot enter removal; a Profile still loaded after the quiesce reboot remains blocked.
+- Preserved compatibility with 0.1.4 run contexts and the unchanged immutable component manifest.
+- Prevented recreated scheduled tasks from overwriting XML backups bound to older journal entries; pending operations support both legacy and unique backup names.
+- Included the independent read-only Cloudbase occupancy collector and its PowerShell 5.1 privacy/failure-path tests.
+- Added service-quiesce and recreated-task backup regression tests.
+
 ## 0.1.4-Diagnostic - 2026-09-05
 
 - Added a Prepare-only exception for the observed loaded Cloudbase profile when its sole holder is the exact, service-session `TaskAgentDetect.exe` scheduled-task image with matching owner SID, trusted signature, secure path and stable process identity.
