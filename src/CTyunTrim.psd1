@@ -1,6 +1,6 @@
 @{
     RootModule        = 'CTyunTrim.psm1'
-    ModuleVersion     = '0.1.5'
+    ModuleVersion     = '0.1.6'
     GUID              = '767c6b7c-b751-4fd3-8a2a-242df21c92df'
     Author            = 'CTyunTrim contributors'
     CompanyName       = 'Community'

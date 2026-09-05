@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.5-Diagnostic'
+$script:CTyunTrimVersion = '0.1.6-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -2457,7 +2457,10 @@ function Resolve-CTPendingOperations {
                 $completed = (Get-CTWsusPolicySignature -Manifest $Manifest).Classification -eq 'Absent'
             }
             'QuarantinePath' {
-                $completed = -not (Test-Path -LiteralPath ([string]$operation.Data.Source)) -and (Test-Path -LiteralPath ([string]$operation.Data.Destination))
+                $quarantineSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+                $quarantineDestination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+                Assert-CTQuarantinePathPair -Context $Context -Source $quarantineSource -Destination $quarantineDestination
+                $completed = -not (Test-Path -LiteralPath $quarantineSource) -and (Test-Path -LiteralPath $quarantineDestination)
             }
             'LocalUser' {
                 $expectedSid = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'SID')
@@ -3615,6 +3618,52 @@ function Get-CTQuarantineDestination {
     return Join-Path (Join-Path $Context.Root 'quarantine') (Join-Path $driveName $relative)
 }
 
+function Get-CTRecreatedQuarantineDestination {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $fullPath = ConvertTo-CTFullPath -Path $Path
+    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    $driveName = $volumeRoot.TrimEnd('\').Replace(':', '')
+    $relative = $fullPath.Substring($volumeRoot.Length).TrimStart('\')
+    $generation = [guid]::NewGuid().ToString('N')
+    $root = Join-Path (Join-Path (Join-Path $Context.Root 'quarantine') 'recreated') $generation
+    return [PSCustomObject]@{
+        Generation  = $generation
+        Destination = Join-Path $root (Join-Path $driveName $relative)
+    }
+}
+
+function Assert-CTQuarantinePathPair {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $sourceFull = ConvertTo-CTFullPath -Path $Source
+    $destinationFull = ConvertTo-CTFullPath -Path $Destination
+    $sourceVolumeRoot = [IO.Path]::GetPathRoot($sourceFull).TrimEnd('\')
+    $runRoot = ConvertTo-CTFullPath -Path $Context.Root
+    $quarantineRoot = ConvertTo-CTFullPath -Path (Join-Path $Context.Root 'quarantine')
+    if ($sourceFull.TrimEnd('\').Equals($sourceVolumeRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $sourceFull.Equals($runRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $sourceFull.StartsWith($runRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $runRoot.StartsWith($sourceFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-CTPathWithinRoot -Path $sourceFull -Root $quarantineRoot -AllowEqual) -or
+        -not (Test-CTPathWithinRoot -Path $destinationFull -Root $quarantineRoot) -or
+        -not [IO.Path]::GetPathRoot($sourceFull).Equals([IO.Path]::GetPathRoot($destinationFull), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Quarantine source or destination escaped its same-volume run boundary.'
+    }
+    if ((Test-CTPathHasReparsePoint -Path $sourceFull) -or
+        (Test-CTPathHasReparsePoint -Path $destinationFull) -or
+        (Test-CTPathHasReparsePoint -Path $quarantineRoot)) {
+        throw 'Quarantine source or destination has a reparse-point ancestor.'
+    }
+}
+
 function Move-CTPathToQuarantine {
     param(
         [Parameter(Mandatory = $true)]
@@ -3630,47 +3679,114 @@ function Move-CTPathToQuarantine {
         [Management.Automation.PSCmdlet]$Caller
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
     $source = ConvertTo-CTFullPath -Path $Path
     if (Test-CTPathIsProtected -Candidate $source -ProtectedPaths $ProtectedPaths) {
         throw "Refusing to quarantine a protected path or its parent: $source"
     }
+    $sourceOperations = @($Context.Operations | Where-Object {
+        $_.Type -eq 'QuarantinePath' -and ([string]$_.Target).Equals($source, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $pending = @($sourceOperations | Where-Object { $_.Status -eq 'Pending' })
+    $completed = @($sourceOperations | Where-Object { $_.Status -eq 'Completed' })
+    if ($pending.Count -gt 1) { throw "Multiple pending quarantine operations exist for: $source" }
+    if ($pending.Count -eq 0 -and -not (Test-Path -LiteralPath $source)) { return }
 
-    if (Test-CTPathHasReparsePoint -Path $source) {
-        throw "Refusing to quarantine a path with a reparse-point ancestor: $source"
+    foreach ($operation in $completed) {
+        $recordedSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+        $recordedDestination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+        if (-not $recordedSource.Equals($source, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Completed quarantine source identity changed: $source"
+        }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $recordedDestination
+        $otherOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and [string]$_.Id -ne [string]$operation.Id -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($recordedDestination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($otherOwners.Count -gt 0) { throw "Completed quarantine destination has another journal owner: $recordedDestination" }
+        if (-not (Test-Path -LiteralPath $recordedDestination)) {
+            throw "A completed quarantine backup is missing; recreated source was preserved: $source"
+        }
     }
 
-    $destination = Get-CTQuarantineDestination -Context $Context -Path $source
-    $quarantineRoot = ConvertTo-CTFullPath -Path (Join-Path $Context.Root 'quarantine')
-    if (-not (Test-CTPathWithinRoot -Path $destination -Root $quarantineRoot)) {
-        throw "Quarantine destination escaped the run directory: $destination"
+    $generation = 'Original'
+    $previousOperationId = $null
+    if ($pending.Count -eq 1) {
+        $operation = $pending[0]
+        $destination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+        $recordedSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+        if (-not $recordedSource.Equals($source, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Pending quarantine source identity changed: $source"
+        }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        $otherOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and [string]$_.Id -ne [string]$operation.Id -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($destination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($otherOwners.Count -gt 0) { throw "Pending quarantine destination has another journal owner: $destination" }
+        $sourceExists = Test-Path -LiteralPath $source
+        $destinationExists = Test-Path -LiteralPath $destination
+        if ($sourceExists -and $destinationExists) { throw "Pending quarantine source and destination both exist; merge was refused: $source" }
+        if (-not $sourceExists -and $destinationExists) {
+            Complete-CTOperation -Context $Context -Id ([string]$operation.Id)
+            return
+        }
+        if (-not $sourceExists) { throw "Pending quarantine source and destination are both missing: $source" }
+        $operationId = [string]$operation.Id
+        $generationValue = Get-CTPropertyValue -InputObject $operation.Data -Name 'Generation'
+        if (-not [string]::IsNullOrWhiteSpace([string]$generationValue)) { $generation = [string]$generationValue }
+        $previousOperationId = Get-CTPropertyValue -InputObject $operation.Data -Name 'PreviousOperationId'
     }
-    if (-not ([IO.Path]::GetPathRoot($source).Equals([IO.Path]::GetPathRoot($destination), [StringComparison]::OrdinalIgnoreCase))) {
-        throw "Quarantine must be on the same volume as the source: $source -> $destination"
-    }
-
-    if (Test-Path -LiteralPath $destination) {
-        throw "Quarantine destination already exists: $destination"
+    else {
+        if (-not (Test-Path -LiteralPath $source)) { return }
+        if ($completed.Count -gt 0) {
+            $newDestination = Get-CTRecreatedQuarantineDestination -Context $Context -Path $source
+            $destination = [string]$newDestination.Destination
+            $generation = 'Recreated:' + [string]$newDestination.Generation
+            $previousOperationId = [string]$completed[-1].Id
+        }
+        else { $destination = Get-CTQuarantineDestination -Context $Context -Path $source }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        $destinationOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($destination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($destinationOwners.Count -gt 0 -or (Test-Path -LiteralPath $destination)) {
+            throw "Unknown quarantine destination collision: $destination"
+        }
+        $operationId = $null
     }
 
     if (Confirm-CTRequiredOperation -Caller $Caller -Target $source -Action "Move to quarantine: $destination") {
         $parent = Split-Path -Parent $destination
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        $operationId = Start-CTOperation -Context $Context -Type 'QuarantinePath' -Target $source -Data @{
-            Source      = $source
-            Destination = $destination
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+        if ((Test-CTPathHasReparsePoint -Path $parent) -or (Test-Path -LiteralPath $destination)) {
+            throw "Quarantine destination changed before journaling: $destination"
+        }
+        if ($null -eq $operationId) {
+            $operationId = Start-CTOperation -Context $Context -Type 'QuarantinePath' -Target $source -Data @{
+                Source              = $source
+                Destination         = $destination
+                Generation          = $generation
+                PreviousOperationId = $previousOperationId
+            }
         }
         try {
-            if ((Test-CTPathHasReparsePoint -Path $source) -or (Test-CTPathHasReparsePoint -Path $parent)) {
-                throw 'A reparse point appeared after preflight.'
+            Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+            if (Test-Path -LiteralPath $destination) { throw "Quarantine destination collision appeared: $destination" }
+            $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+            if ($sourceItem.PSIsContainer) { [IO.Directory]::Move($source, $destination) }
+            else { [IO.File]::Move($source, $destination) }
+            if ((Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $destination) -or
+                (Test-CTPathHasReparsePoint -Path $destination)) {
+                throw 'Quarantine move did not reach one exact destination.'
             }
-            Move-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
             Complete-CTOperation -Context $Context -Id $operationId
         }
         catch {
+            if ((Test-Path -LiteralPath $source) -and (Test-Path -LiteralPath $destination)) {
+                throw "Quarantine source and destination both exist after move failure; merge was refused: $source"
+            }
             $Context.RebootNeeded = $true
             Add-CTWarning -Context $Context -Message "Could not quarantine $source, usually because it is still loaded. Reboot and run Apply again. $($_.Exception.Message)"
         }

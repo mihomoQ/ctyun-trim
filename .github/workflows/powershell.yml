@@ -30,12 +30,15 @@ jobs:
       - name: Recreated task backup tests
         shell: powershell
         run: .\tests\Invoke-TaskBackupTests.ps1
+      - name: Recreated quarantine source tests
+        shell: powershell
+        run: .\tests\Invoke-QuarantineResumeTests.ps1
       - name: Build release and verify checksum
         shell: powershell
         run: |
-          .\build\Build-Release.ps1 -Version 0.1.5-Diagnostic | Out-Null
-          $archive = '.\artifacts\CTyunTrim-0.1.5-Diagnostic.zip'
-          $checksum = '.\artifacts\CTyunTrim-0.1.5-Diagnostic.zip.sha256'
+          .\build\Build-Release.ps1 -Version 0.1.6-Diagnostic | Out-Null
+          $archive = '.\artifacts\CTyunTrim-0.1.6-Diagnostic.zip'
+          $checksum = '.\artifacts\CTyunTrim-0.1.6-Diagnostic.zip.sha256'
           if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $checksum)) { throw 'Release outputs are missing.' }
           $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
@@ -44,7 +47,7 @@ jobs:
         shell: powershell
         run: |
           $destination = Join-Path $env:RUNNER_TEMP 'CTyunTrim Diagnostic Extracted'
-          Expand-Archive -LiteralPath '.\artifacts\CTyunTrim-0.1.5-Diagnostic.zip' -DestinationPath $destination
+          Expand-Archive -LiteralPath '.\artifacts\CTyunTrim-0.1.6-Diagnostic.zip' -DestinationPath $destination
           Push-Location $destination
           try {
             .\tests\Invoke-StaticTests.ps1
@@ -53,6 +56,7 @@ jobs:
             .\tests\Invoke-CloudbaseOccupancyTests.ps1
             .\tests\Invoke-CloudbaseQuiesceTests.ps1
             .\tests\Invoke-TaskBackupTests.ps1
+            .\tests\Invoke-QuarantineResumeTests.ps1
           }
           finally { Pop-Location }
       - name: Audit smoke test on a non-CTyun runner

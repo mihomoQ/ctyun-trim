@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$')]
-    [string]$Version = '0.1.5-Diagnostic'
+    [string]$Version = '0.1.6-Diagnostic'
 )
 
 Set-StrictMode -Version 2.0
@@ -153,6 +153,7 @@ $allowedReleaseFiles = @(
     'tests/Invoke-DiagnosticTests.ps1',
     'tests/Invoke-StaticTests.ps1',
     'tests/Invoke-TaskBackupTests.ps1',
+    'tests/Invoke-QuarantineResumeTests.ps1',
     'tools/Get-CTCloudbaseOccupancy.ps1',
     'tools/README.md'
 )
