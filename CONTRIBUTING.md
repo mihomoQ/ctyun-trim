@@ -43,3 +43,8 @@ Rules based only on `*cloud*`, `*ctyun*`, display names, company names or broad 
 9. Diagnostic schema changes pass canary-leak, fixed-entry, size, hash, failure-path and read-only regression tests.
 
 Test fixtures and Issues must not contain real credentials or unsanitized machine data.
+
+## Release notes
+
+Use the Chinese, user-facing categories and publishing workflow in [the release guide](docs/RELEASING.md).
+Keep each version's published body in `docs/releases/<version>.md`; tutorials and test reports do not belong in the release body.
