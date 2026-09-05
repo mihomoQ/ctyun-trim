@@ -95,3 +95,4 @@ finally {
     }
 }
 Write-Host 'Recreated task backup tests passed (unique, immutable, pending resume, legacy, tamper, path, decline).'
+exit 0

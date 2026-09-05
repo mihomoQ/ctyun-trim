@@ -509,3 +509,4 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host 'Cloudbase quiesce tests passed.'
+exit 0

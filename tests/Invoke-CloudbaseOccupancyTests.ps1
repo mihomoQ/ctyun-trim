@@ -370,3 +370,4 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host 'Cloudbase occupancy tests passed.'
+exit 0
