@@ -1,4 +1,36 @@
-# LGPO.exe
+# Support tools
+
+## Cloudbase profile occupancy
+
+`Get-CTCloudbaseOccupancy.ps1` is a standalone, read-only support collector for a
+Cloudbase Profile that remains loaded after restarting. Run it in 64-bit elevated
+Windows PowerShell 5.1; it does not require a CTyunTrim RunId or change its journal.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Get-CTCloudbaseOccupancy.ps1
+```
+
+It prints JSON with account/Profile consistency, enabled/loaded/hive flags,
+account-owned process summaries, WMI logon-session types, and service/task
+references. Queries that cannot complete are reported explicitly. A zero process
+count is not proof that another account's process does not hold a registry handle;
+WMI logon-session records are not proof of an active interactive desktop.
+
+The collector omits raw SIDs, account names, command lines, arbitrary paths and
+event messages. Known component names use a fixed allowlist; unknown references
+are counted. It does not write files, upload data, stop processes, disable accounts
+or services, unload hives, or delete Profiles. Review its output before sharing it.
+
+This helper is also included in the 0.1.5 release, under `tools`.
+Do not repeat Apply solely because this collector completed; its output is
+diagnostic evidence, not a deletion approval.
+
+`PrincipalResolutionFailedCount` counts task or service principals that this
+collector could not resolve; it is not a count of malicious tasks. Incomplete
+task attribution does not invalidate independently completed process and service
+queries. Use each section's completion flags when interpreting the result.
+
+## LGPO.exe
 
 CTyunTrim does not redistribute Microsoft `LGPO.exe`.
 

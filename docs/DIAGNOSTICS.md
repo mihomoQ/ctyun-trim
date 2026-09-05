@@ -77,6 +77,12 @@ After an abrupt process or machine failure, run a new read-only invocation with 
 
 The exporter never guesses the newest RunId or scans unrelated run directories.
 
+From 0.1.5, the journal may include `ServiceQuiesce` for the exact Cloudbase
+service. `PrimarySucceeded=true` with `Status=PendingReboot` after this operation
+means only the service startup transition completed; it does not mean trimming
+is complete. Restart and use the same RunId with 0.1.5 to resume. The service's
+raw registry export and account SID remain excluded from the diagnostic ZIP.
+
 ## Privacy and sharing
 
 No diagnostic file is uploaded automatically. Review all four entries before attaching the ZIP to an issue. The sanitizer is a defense-in-depth boundary, not permission to share data you have not inspected.

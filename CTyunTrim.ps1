@@ -2,7 +2,7 @@
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')]
+    [ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify', 'Trim')]
     [string]$Mode = 'Audit',
 
     [string]$ManifestPath,
@@ -75,14 +75,28 @@ function New-CTDiagnosticEnvelope {
         $passedProperty = $item.PSObject.Properties['Passed']
         $rebootProperty = $item.PSObject.Properties['RebootNeeded']
         $warningCountProperty = $item.PSObject.Properties['WarningCount']
+        $sourceModeProperty = $item.PSObject.Properties['SourceMode']
         $status = if ($null -ne $statusProperty -and [string]$statusProperty.Value -in @('Running', 'Prepared', 'PendingReboot', 'Applied', 'Failed')) { [string]$statusProperty.Value } else { $null }
         $runId = if ($null -ne $runIdProperty -and [string]$runIdProperty.Value -match '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}$') { [string]$runIdProperty.Value } else { $null }
+        $sourceMode = if ($null -ne $sourceModeProperty -and [string]$sourceModeProperty.Value -eq 'Trim') { 'Trim' } else { 'Direct' }
+        $passed = if ($null -ne $passedProperty -and $passedProperty.Value -is [bool]) { [bool]$passedProperty.Value } else { $null }
+        $nextAction = if ($sourceMode -eq 'Trim') {
+            if ($status -eq 'PendingReboot') { 'RebootThenRunTrim' }
+            elseif ($status -eq 'Applied' -and $passed -eq $true) { 'VerificationCompleteRunTrimToRecheck' }
+            elseif ($status -eq 'Applied') { 'RunTrimToVerify' }
+            else { 'RunTrimAgain' }
+        }
+        elseif ($status -eq 'Prepared') { 'UpdateThenReviOSThenApplySameRunId' }
+        elseif ($status -eq 'PendingReboot') { 'RebootThenApplySameRunId' }
+        elseif ($status -eq 'Applied') { 'VerifySameRunId' }
+        else { 'None' }
         [PSCustomObject]@{
             Available    = $true
             ItemCount    = 1
+            SourceMode   = $sourceMode
             RunId        = $runId
             Status       = $status
-            Passed       = if ($null -ne $passedProperty -and $passedProperty.Value -is [bool]) { [bool]$passedProperty.Value } else { $null }
+            Passed       = $passed
             RebootNeeded = if ($null -ne $rebootProperty -and $rebootProperty.Value -is [bool]) { [bool]$rebootProperty.Value } else { $null }
             WarningCount = if ($null -ne $warningCountProperty -and
                 ($warningCountProperty.Value -is [byte] -or $warningCountProperty.Value -is [int16] -or $warningCountProperty.Value -is [int32] -or $warningCountProperty.Value -is [int64])) {
@@ -90,7 +104,8 @@ function New-CTDiagnosticEnvelope {
                 if ($count -lt 0) { 0 } elseif ($count -gt 100000) { 100000 } else { $count }
             }
             else { $null }
-            NextAction   = if ($status -eq 'Prepared') { 'UpdateThenReviOSThenApplySameRunId' } elseif ($status -eq 'PendingReboot') { 'RebootThenApplySameRunId' } elseif ($status -eq 'Applied') { 'VerifySameRunId' } else { 'None' }
+            NextAction   = $nextAction
+            NextCommand  = if ($sourceMode -eq 'Trim') { '.\Trim.cmd -Force' } else { $null }
         }
     }
 
@@ -152,7 +167,10 @@ try {
         throw $primaryError
     }
 
-    $verificationFailed = $Mode -eq 'Verify' -and -not [bool]$result.Passed
+    $resultItems = @($result)
+    $resultPassedProperty = if ($resultItems.Count -eq 1 -and $null -ne $resultItems[0]) { $resultItems[0].PSObject.Properties['Passed'] } else { $null }
+    $verificationFailed = $Mode -in @('Verify','Trim') -and $null -ne $resultPassedProperty -and
+        $resultPassedProperty.Value -is [bool] -and -not [bool]$resultPassedProperty.Value
     $diagnosticErrorCode = 'NotRequested'
     if ($Diagnostic) {
         try {
@@ -171,8 +189,9 @@ try {
 
     if ($Json) { $output | ConvertTo-Json -Depth 14 } else { $output }
     if ($verificationFailed) { throw 'CTyunTrim verification failed. Review the emitted Failures collection.' }
+    $trimWasReadOnlyVerify = $Mode -eq 'Trim' -and $null -ne $resultPassedProperty -and $resultPassedProperty.Value -is [bool]
     $diagnosticFailureIsFatal = $Diagnostic -and $null -eq $bundle -and
-        ($WhatIfPreference -or $Mode -in @('Audit', 'Plan', 'Verify'))
+        ($WhatIfPreference -or $Mode -in @('Audit', 'Plan', 'Verify') -or $trimWasReadOnlyVerify)
     if ($diagnosticFailureIsFatal) {
         throw "CTyunTrim diagnostic export failed: $diagnosticErrorCode"
     }
