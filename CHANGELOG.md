@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Changed the project license to GNU GPL version 3 only (`GPL-3.0-only`). Existing release tags and archives retain their original license files.
+
 ## 0.1.8-Diagnostic - 2026-09-05
 
 - Added Start-menu shutdown/restart visibility repair for the observed OEM machine `NoClose` restriction, current-user `NoClose`, and machine `HidePowerOptions`. Only existing DWORD values equal to 1 are changed to 0.

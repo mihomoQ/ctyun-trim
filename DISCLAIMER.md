@@ -12,4 +12,4 @@ CTyunTrim can only reduce management surface visible inside the Windows guest. I
 
 The project deliberately preserves selected vendor SYSTEM services, user-mode components and kernel drivers to retain interoperability. Those components may continue to provide management or data channels. Running CTyunTrim is not proof of provider isolation, confidentiality, integrity, absence of backdoors or a zero-trust boundary.
 
-The software is provided under the MIT License on an “AS IS” basis without warranty.
+The software is licensed under the GNU General Public License, version 3 only (GPL-3.0-only), and is provided without warranty as described in [LICENSE](LICENSE).

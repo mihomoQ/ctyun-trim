@@ -9,7 +9,7 @@
   </p>
   <p>
     <a href="https://github.com/mihomoQ/ctyun-trim/actions/workflows/powershell.yml"><img src="https://github.com/mihomoQ/ctyun-trim/actions/workflows/powershell.yml/badge.svg?branch=main" alt="PowerShell checks"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="GPL-3.0-only"></a>
   </p>
   <p><a href="README.md">简体中文</a> · <strong>English</strong></p>
 </div>
@@ -96,4 +96,4 @@ Component evidence, test feedback, and improvements are welcome. Read the [contr
 
 This project is not affiliated with or endorsed by CTyun, ReviOS, AME, or related parties. Preserving vendor components means only that they are functionally required; it is not a statement that they are safe or trustworthy. This tool also cannot constrain the cloud platform's control over virtual machines, disks, snapshots, or networks. See the [disclaimer](DISCLAIMER.md).
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [GNU General Public License v3.0](LICENSE), version 3 only (`GPL-3.0-only`). Historical release archives retain their included licenses.

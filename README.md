@@ -9,7 +9,7 @@
   </p>
   <p>
     <a href="https://github.com/mihomoQ/ctyun-trim/actions/workflows/powershell.yml"><img src="https://github.com/mihomoQ/ctyun-trim/actions/workflows/powershell.yml/badge.svg?branch=main" alt="PowerShell checks"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="GPL-3.0-only"></a>
   </p>
   <p><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
 </div>
@@ -96,4 +96,4 @@ CTyunTrim 用于精简天翼云电脑 Windows 预装镜像中已识别的管理�
 
 本项目与天翼云、ReviOS、AME 等相关方无隶属或认可关系。保留厂商组件仅表示功能需要，不代表其安全可信；本工具也无法约束云平台对虚拟机、磁盘、快照和网络的控制。详见[免责声明](DISCLAIMER.md)。
 
-采用 [MIT License](LICENSE)。
+采用 [GNU General Public License v3.0](LICENSE)，仅限第 3 版（`GPL-3.0-only`）。历史发布包保留各自附带的许可证。
