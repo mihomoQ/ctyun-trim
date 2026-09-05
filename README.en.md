@@ -31,7 +31,11 @@ CTyunTrim removes identified management, self-repair, and optional components fr
 
 CTyunTrim requires **Windows 11 x64, administrator privileges, and Windows PowerShell 5.1**. The `.cmd` launchers automatically select 64-bit Windows PowerShell. Do not use PowerShell 7 to run mutating operations directly.
 
-The current profile targets builds **26100 / 26200** and recorded component combinations including `clipa 2.1.0.0`. A matching Windows build number alone does not establish compatibility: actual files and services must also pass validation. The tool has been tested on a stock-image-plus-ReviOS combination. Audit other images first, and never bypass preflight checks. See the [reference baseline](docs/REFERENCE-BASELINE.md) and [real-system test record](docs/TEST-RESULTS-0.1.7.md).
+The project is developed against CTyun's preinstalled **Windows 11 Enterprise LTSC (64-bit, Chinese)** image, identified as:
+
+`Windows-11-企业版-LTSC-x64-Chinese-v26.0316`
+
+Testing has covered this preinstalled image used together with ReviOS. The identifier above is an image version, not a Windows build number. The current profile still validates builds **26100 / 26200** and recorded component combinations including `clipa 2.1.0.0`. A matching image name or Windows build number alone does not establish compatibility: actual files and services must also pass validation. Audit other images first, and never bypass preflight checks. See the [reference baseline](docs/REFERENCE-BASELINE.md) and [real-system test record](docs/TEST-RESULTS-0.1.7.md).
 
 ## Quick start
 

@@ -31,7 +31,11 @@ CTyunTrim 用于精简天翼云电脑 Windows 预装镜像中已识别的管理�
 
 需要 **Windows 11 x64、管理员权限和 Windows PowerShell 5.1**；`.cmd` 入口会自动选择 64 位 Windows PowerShell，不能用 PowerShell 7 直接执行修改。
 
-当前配置针对 build **26100 / 26200**、`clipa 2.1.0.0` 等已记录组件组合。系统版本号相同并不代表兼容，实际文件与服务还必须通过校验。已在原厂镜像＋ReviOS 组合上测试；其他镜像请先审计，不要绕过预检查。详见[参考镜像](docs/REFERENCE-BASELINE.md)和[实机测试记录](docs/TEST-RESULTS-0.1.7.md)。
+项目基于天翼云预装的 **Windows 11 企业版 LTSC（64 位中文版）** 开发，参考镜像版本为：
+
+`Windows-11-企业版-LTSC-x64-Chinese-v26.0316`
+
+已在该预装镜像与 ReviOS 配合的环境中测试。上述名称是镜像版本标识，不是 Windows build 号；当前配置仍校验 build **26100 / 26200**、`clipa 2.1.0.0` 等已记录组件组合。镜像名称或系统版本相同并不代表兼容，实际文件与服务还必须通过校验。其他镜像请先审计，不要绕过预检查。详见[参考镜像](docs/REFERENCE-BASELINE.md)和[实机测试记录](docs/TEST-RESULTS-0.1.7.md)。
 
 ## 快速开始
 

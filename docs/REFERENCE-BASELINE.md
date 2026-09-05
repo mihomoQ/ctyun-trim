@@ -2,6 +2,14 @@
 
 This file records the observations used for the first manifest. It is evidence for one image, not a universal CTyun specification.
 
+## Source image
+
+The project is based on CTyun's preinstalled **Windows 11 Enterprise LTSC, 64-bit, Chinese** image:
+
+`Windows-11-企业版-LTSC-x64-Chinese-v26.0316`
+
+This is the vendor image identifier, not a Windows build number. Testing also covered the image after applying ReviOS. Compatibility still depends on the supported live Windows builds and the exact component fingerprint; the image name alone is not sufficient.
+
 ## Tested final runtime
 
 ```text
