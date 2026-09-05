@@ -3,7 +3,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:CTyunTrimVersion = '0.1.5-Diagnostic'
+$script:CTyunTrimVersion = '0.1.7-Diagnostic'
 $script:GuardDebugger = "$env:SystemRoot\System32\cmd.exe /d /c exit 0"
 $script:GuardOwner = 'CTyunTrim'
 $script:VendorPattern = 'ctyun|ecloud|clink|clipa|cloudshare|tianyicloud|chinatelecom|china telecom'
@@ -1629,7 +1629,7 @@ function Get-CTDiagnosticEventView {
     param([Parameter(Mandatory = $true)][hashtable]$Manifest)
 
     $events = New-Object Collections.Generic.List[object]
-    $allowedStages = @('Invocation', 'Manifest', 'RunContext', 'Operation', 'Confirmation', 'Preflight', 'NativeCommand', 'Apply', 'Prepare', 'Verification', 'Journal')
+    $allowedStages = @('Invocation', 'Manifest', 'RunContext', 'Operation', 'Confirmation', 'Preflight', 'NativeCommand', 'Apply', 'Prepare', 'Trim', 'ProcessStop', 'Verification', 'Journal')
     $allowedTypes = @('Baseline', 'ExecutionGuard', 'ScheduledTask', 'RunValue', 'ProcessStop', 'Service', 'ServiceQuiesce', 'DriverService', 'LocalPolicy', 'QuarantinePath', 'LocalUser', 'UserProfile', 'Certificate', 'FirewallRule', 'CloudbaseIdentityEvidence', 'NativeCommand')
     $index = 0
     foreach ($event in @($script:DiagnosticEvents) | Select-Object -First 2000) {
@@ -1822,7 +1822,7 @@ function Test-CTDiagnosticArchiveSafe {
 function New-CTyunTrimDiagnosticBundle {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')][string]$Mode,
+        [Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify', 'Trim')][string]$Mode,
         [Parameter(Mandatory = $true)][string]$ManifestPath,
         [Parameter(Mandatory = $true)][string]$BackupRoot,
         [string]$RunId,
@@ -2021,7 +2021,7 @@ Review the JSON before sharing it.
 
 function Start-CTyunTrimDiagnosticCapture {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')][string]$Mode)
+    param([Parameter(Mandatory = $true)][ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify', 'Trim')][string]$Mode)
 
     Initialize-CTDiagnosticState -Enabled $true -Mode $Mode
     return [PSCustomObject]@{
@@ -2372,6 +2372,134 @@ function Complete-CTOperation {
     Add-CTDiagnosticEvent -Stage 'Operation' -Message 'Completed write-ahead operation.' -Data @{ Type = [string]$operation.Type; Target = [string]$operation.Target; Status = 'Completed' }
 }
 
+function Get-CTProcessStopIdentityState {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Operation
+    )
+
+    if ([string]$Operation.Type -ne 'ProcessStop') {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'WrongOperationType'; Process = $null }
+    }
+    $target = [string]$Operation.Target
+    $separator = $target.LastIndexOf(':')
+    if ($separator -le 0 -or $separator -ge ($target.Length - 1)) {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'InvalidJournalTarget'; Process = $null }
+    }
+    $recordedName = $target.Substring(0, $separator)
+    $processId = 0
+    if (-not [int]::TryParse($target.Substring($separator + 1), [ref]$processId) -or $processId -le 0) {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'InvalidJournalProcessId'; Process = $null }
+    }
+    $recordedPath = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'Path')
+    $recordedStartTicks = [string](Get-CTPropertyValue -InputObject $Operation.Data -Name 'StartTimeUtcTicks')
+    if ([string]::IsNullOrWhiteSpace($recordedName) -or [string]::IsNullOrWhiteSpace($recordedPath) -or
+        $recordedStartTicks -notmatch '^[0-9]{10,20}$') {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'IncompleteJournalIdentity'; Process = $null }
+    }
+    try { $recordedFullPath = ConvertTo-CTFullPath -Path $recordedPath }
+    catch { return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'InvalidJournalPath'; Process = $null } }
+
+    $current = $null
+    try { $current = Get-Process -Id $processId -ErrorAction Stop }
+    catch {
+        try { $cimProcess = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop) }
+        catch { return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'LivenessQueryFailed'; Process = $null } }
+        if ($cimProcess.Count -eq 0) {
+            return [PSCustomObject]@{ State = 'Resolved'; Reason = 'ProcessAbsent'; Process = $null }
+        }
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'ProcessInspectionFailed'; Process = $null }
+    }
+    $currentProcesses = @($current)
+    if ($currentProcesses.Count -ne 1) {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'AmbiguousProcessIdentity'; Process = $null }
+    }
+    $current = $currentProcesses[0]
+    if (-not [string]::Equals([string]$current.ProcessName, $recordedName, [StringComparison]::OrdinalIgnoreCase)) {
+        return [PSCustomObject]@{ State = 'Resolved'; Reason = 'ProcessNameChanged'; Process = $null }
+    }
+
+    $currentPath = $null
+    $currentStartTicks = $null
+    try { $currentPath = ConvertTo-CTFullPath -Path ([string]$current.Path) } catch { }
+    try { $currentStartTicks = [string]$current.StartTime.ToUniversalTime().Ticks } catch { }
+    if ([string]::IsNullOrWhiteSpace([string]$currentPath) -or [string]::IsNullOrWhiteSpace($currentStartTicks)) {
+        return [PSCustomObject]@{ State = 'Indeterminate'; Reason = 'ProcessIdentityUnreadable'; Process = $null }
+    }
+    if (-not [string]::Equals($currentPath, $recordedFullPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $currentStartTicks -ne $recordedStartTicks) {
+        return [PSCustomObject]@{ State = 'Resolved'; Reason = 'ProcessIdentityChanged'; Process = $null }
+    }
+    return [PSCustomObject]@{ State = 'Running'; Reason = 'ExactIdentityStillRunning'; Process = $current }
+}
+
+function Resolve-CTPendingProcessStops {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [ValidateRange(0, 10)][int]$WaitSeconds = 0,
+        [switch]$Final
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $states = @()
+    do {
+        $states = @()
+        $pending = @($Context.Operations | Where-Object { $_.Type -eq 'ProcessStop' -and $_.Status -eq 'Pending' })
+        foreach ($operation in $pending) {
+            $state = Get-CTProcessStopIdentityState -Operation $operation
+            if ([string]$state.State -eq 'Resolved') {
+                Complete-CTOperation -Context $Context -Id ([string]$operation.Id)
+            }
+            else {
+                $states += [PSCustomObject]@{ Operation = $operation; State = [string]$state.State; Reason = [string]$state.Reason }
+            }
+        }
+        $remaining = @($Context.Operations | Where-Object { $_.Type -eq 'ProcessStop' -and $_.Status -eq 'Pending' })
+        if ($remaining.Count -eq 0 -or $stopwatch.Elapsed.TotalSeconds -ge $WaitSeconds) { break }
+        $remainingMilliseconds = [int][Math]::Min(250, [Math]::Max(1, (($WaitSeconds * 1000) - $stopwatch.ElapsedMilliseconds)))
+        Start-Sleep -Milliseconds $remainingMilliseconds
+    } while ($true)
+    $stopwatch.Stop()
+
+    $remaining = @($Context.Operations | Where-Object { $_.Type -eq 'ProcessStop' -and $_.Status -eq 'Pending' })
+    $remainingIds = @($remaining | ForEach-Object { [string]$_.Id })
+    $currentStates = @($states | Where-Object { $remainingIds -contains [string]$_.Operation.Id })
+    $runningCount = @($currentStates | Where-Object { $_.State -eq 'Running' }).Count
+    $indeterminateCount = @($currentStates | Where-Object { $_.State -ne 'Running' }).Count
+    if ($remaining.Count -gt 0 -and ($WaitSeconds -gt 0 -or $Final)) {
+        Add-CTDiagnosticEvent -Level 'Warning' -Stage 'ProcessStop' -Message $(if ($Final) { 'Final process-stop reconciliation found current unresolved operations.' } else { 'Shared process-stop wait window ended with unresolved operations; a later pass will recheck them.' }) -Data @{
+            PendingCount       = $remaining.Count
+            RunningCount       = $runningCount
+            IndeterminateCount = $indeterminateCount
+            Final              = [bool]$Final
+            Status             = $(if ($Final) { 'Failed' } else { 'Pending' })
+            RebootNeeded       = [bool]$Final
+        }
+    }
+    if ($Final -and $remaining.Count -gt 0) {
+        $Context.RebootNeeded = $true
+        foreach ($item in $currentStates) {
+            $target = [string]$item.Operation.Target
+            $message = if ([string]$item.State -eq 'Running') {
+                "Optional process exact identity is still running after the final stop pass: $target"
+            }
+            else {
+                "Optional process identity remains unresolved after the final stop pass: $target ($([string]$item.Reason))"
+            }
+            if (@($Context.Warnings | Where-Object { [string]$_ -eq $message }).Count -eq 0) {
+                Add-CTWarning -Context $Context -Message $message
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        PendingCount       = $remaining.Count
+        RunningCount       = $runningCount
+        IndeterminateCount = $indeterminateCount
+        Final              = [bool]$Final
+    }
+}
+
 function Resolve-CTPendingOperations {
     param(
         [Parameter(Mandatory = $true)][PSObject]$Context,
@@ -2420,27 +2548,8 @@ function Resolve-CTPendingOperations {
                 }
             }
             'ProcessStop' {
-                $pidText = ([string]$operation.Target -split ':')[-1]
-                $processId = 0
-                if ([int]::TryParse($pidText, [ref]$processId)) {
-                    $currentProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
-                    if ($null -eq $currentProcess) {
-                        $completed = $true
-                    }
-                    else {
-                        $recordedName = ([string]$operation.Target -split ':')[0]
-                        $recordedPath = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Path')
-                        $recordedStartTicks = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'StartTimeUtcTicks')
-                        $currentPath = $null
-                        $currentStartTicks = $null
-                        try { $currentPath = [string]$currentProcess.Path } catch { }
-                        try { $currentStartTicks = [string]$currentProcess.StartTime.ToUniversalTime().Ticks } catch { }
-                        $completed = -not ([string]$currentProcess.ProcessName -eq $recordedName -and
-                            $currentPath -eq $recordedPath -and
-                            -not [string]::IsNullOrWhiteSpace($recordedStartTicks) -and
-                            $currentStartTicks -eq $recordedStartTicks)
-                    }
-                }
+                $processState = Get-CTProcessStopIdentityState -Operation $operation
+                $completed = [string]$processState.State -eq 'Resolved'
             }
             'Service' {
                 $completed = $null -eq (Get-CTServiceByName -Name ([string]$operation.Target))
@@ -2457,7 +2566,10 @@ function Resolve-CTPendingOperations {
                 $completed = (Get-CTWsusPolicySignature -Manifest $Manifest).Classification -eq 'Absent'
             }
             'QuarantinePath' {
-                $completed = -not (Test-Path -LiteralPath ([string]$operation.Data.Source)) -and (Test-Path -LiteralPath ([string]$operation.Data.Destination))
+                $quarantineSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+                $quarantineDestination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+                Assert-CTQuarantinePathPair -Context $Context -Source $quarantineSource -Destination $quarantineDestination
+                $completed = -not (Test-Path -LiteralPath $quarantineSource) -and (Test-Path -LiteralPath $quarantineDestination)
             }
             'LocalUser' {
                 $expectedSid = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'SID')
@@ -3125,45 +3237,127 @@ function Stop-CTOptionalProcesses {
         [hashtable]$Manifest,
 
         [Parameter(Mandatory = $true)]
-        [Management.Automation.PSCmdlet]$Caller
+        [Management.Automation.PSCmdlet]$Caller,
+
+        [ValidateRange(0, 10)]
+        [int]$WaitSeconds = 10,
+
+        [switch]$OnlyUntracked,
+
+        [switch]$FinalScan
     )
 
+    # A delayed termination from an earlier pass is reconciled before a new
+    # snapshot is considered. This also prevents a reused PID from colliding
+    # with stale pending journal data.
+    [void](Resolve-CTPendingProcessStops -Context $Context -WaitSeconds 0)
     $names = @($Manifest.Processes)
-    foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+    $planned = New-Object Collections.Generic.List[object]
+    foreach ($process in @(Get-Process -ErrorAction Stop)) {
         if ($names -notcontains $process.ProcessName) {
             continue
         }
 
         $path = $null
-        try { $path = $process.Path } catch {}
+        $startTimeUtcTicks = $null
+        try { $path = ConvertTo-CTFullPath -Path ([string]$process.Path) } catch { }
+        try { $startTimeUtcTicks = [string]$process.StartTime.ToUniversalTime().Ticks } catch { }
         if ([string]::IsNullOrWhiteSpace([string]$path) -or
+            [string]::IsNullOrWhiteSpace($startTimeUtcTicks) -or
             -not (Test-CTPathUnderAnyRoot -Path $path -Roots @($Manifest.Directories)) -or
             (Test-CTPathHasReparsePoint -Path $path)) {
-            Add-CTWarning -Context $Context -Message "Process $($process.ProcessName) did not run from an exact approved removal directory, or its path was unsafe; it was not stopped: $path"
+            $unsafeMessage = "Process $($process.ProcessName) did not run from an exact approved removal directory, or its path was unsafe; it was not stopped: $path"
+            if ($FinalScan) {
+                $Context.RebootNeeded = $true
+                if (@($Context.Warnings | Where-Object { [string]$_ -eq $unsafeMessage }).Count -eq 0) {
+                    Add-CTWarning -Context $Context -Message $unsafeMessage
+                }
+            }
+            else {
+                Add-CTDiagnosticEvent -Level 'Warning' -Stage 'ProcessStop' -Message 'A target process path or start identity was unsafe during an initial stop pass; the final scan will recheck it.' -Data @{
+                    Status       = 'Pending'
+                    RebootNeeded = $false
+                }
+            }
             continue
         }
 
+        if ($OnlyUntracked) {
+            $target = "$($process.ProcessName):$($process.Id)"
+            $tracked = @($Context.Operations | Where-Object {
+                $_.Type -eq 'ProcessStop' -and $_.Status -eq 'Pending' -and
+                [string]::Equals([string]$_.Target, $target, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Path'), $path, [StringComparison]::OrdinalIgnoreCase) -and
+                [string](Get-CTPropertyValue -InputObject $_.Data -Name 'StartTimeUtcTicks') -eq $startTimeUtcTicks
+            })
+            if ($tracked.Count -gt 1) { throw "Multiple exact pending ProcessStop identities exist for: $target" }
+            if ($tracked.Count -eq 1) { continue }
+        }
+
         if (Confirm-CTRequiredOperation -Caller $Caller -Target "$($process.ProcessName) PID=$($process.Id)" -Action 'Stop optional vendor process') {
-            $startTimeUtcTicks = $null
-            try { $startTimeUtcTicks = [string]$process.StartTime.ToUniversalTime().Ticks } catch { }
-            if ([string]::IsNullOrWhiteSpace($startTimeUtcTicks)) {
-                throw "Could not bind the process stop to a start time: $($process.ProcessName) PID=$($process.Id)"
-            }
-            $operationId = Start-CTOperation -Context $Context -Type 'ProcessStop' -Target "$($process.ProcessName):$($process.Id)" -Data @{
+            $planned.Add([PSCustomObject]@{
+                ProcessId         = [int]$process.Id
+                ProcessName       = [string]$process.ProcessName
                 Path              = $path
                 StartTimeUtcTicks = $startTimeUtcTicks
-            } -Reversible $false
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
-            if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
-                $Context.RebootNeeded = $true
-                Add-CTWarning -Context $Context -Message "Optional process is still running and prevents a complete Apply: $($process.ProcessName) PID=$($process.Id)"
+                OperationId       = $null
+            })
+        }
+    }
+
+    # All confirmations and WAL records precede every stop request. A declined
+    # confirmation or journal failure cannot leave an unjournaled partial batch.
+    foreach ($item in $planned) {
+        $item.OperationId = Start-CTOperation -Context $Context -Type 'ProcessStop' -Target "$($item.ProcessName):$($item.ProcessId)" -Data @{
+            Path              = [string]$item.Path
+            StartTimeUtcTicks = [string]$item.StartTimeUtcTicks
+        } -Reversible $false
+    }
+
+    foreach ($item in $planned) {
+        $operation = @($Context.Operations | Where-Object { [string]$_.Id -eq [string]$item.OperationId }) | Select-Object -First 1
+        if ($null -eq $operation) { throw "ProcessStop journal operation disappeared before mutation: $($item.ProcessName):$($item.ProcessId)" }
+        $identity = Get-CTProcessStopIdentityState -Operation $operation
+        if ([string]$identity.State -eq 'Resolved') {
+            Complete-CTOperation -Context $Context -Id ([string]$operation.Id)
+            continue
+        }
+        if ([string]$identity.State -ne 'Running' -or $null -eq $identity.Process) {
+            Add-CTDiagnosticEvent -Level 'Warning' -Stage 'ProcessStop' -Message 'Process identity could not be revalidated immediately before its stop request.' -Data @{
+                Target = [string]$operation.Target
+                Reason = [string]$identity.Reason
             }
-            else {
-                Complete-CTOperation -Context $Context -Id $operationId
+            continue
+        }
+        try {
+            Stop-Process -InputObject $identity.Process -Force -ErrorAction Stop
+        }
+        catch {
+            Add-CTDiagnosticEvent -Level 'Warning' -Stage 'ProcessStop' -Message 'A stop request failed; shared reconciliation will determine the current identity state.' -Data @{
+                Target = [string]$operation.Target
             }
         }
     }
+
+    # One shared window replaces N serial five-second waits. This pass records
+    # only historical diagnostics; the caller performs the final classification
+    # after task removal and the second stop pass.
+    [void](Resolve-CTPendingProcessStops -Context $Context -WaitSeconds $WaitSeconds)
+}
+
+function Finalize-CTOptionalProcessStops {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [Parameter(Mandatory = $true)][Management.Automation.PSCmdlet]$Caller,
+        [ValidateRange(0, 10)][int]$WaitSeconds = 0
+    )
+
+    # Close the late-respawn gap after the second shared wait. Already tracked
+    # exact identities are left for final classification; a newly observed PID
+    # receives its own confirmation, WAL record and stop request.
+    Stop-CTOptionalProcesses -Context $Context -Manifest $Manifest -Caller $Caller -WaitSeconds $WaitSeconds -OnlyUntracked -FinalScan
+    return Resolve-CTPendingProcessStops -Context $Context -WaitSeconds 0 -Final
 }
 
 function Remove-CTServiceEntry {
@@ -3615,6 +3809,52 @@ function Get-CTQuarantineDestination {
     return Join-Path (Join-Path $Context.Root 'quarantine') (Join-Path $driveName $relative)
 }
 
+function Get-CTRecreatedQuarantineDestination {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $fullPath = ConvertTo-CTFullPath -Path $Path
+    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    $driveName = $volumeRoot.TrimEnd('\').Replace(':', '')
+    $relative = $fullPath.Substring($volumeRoot.Length).TrimStart('\')
+    $generation = [guid]::NewGuid().ToString('N')
+    $root = Join-Path (Join-Path (Join-Path $Context.Root 'quarantine') 'recreated') $generation
+    return [PSCustomObject]@{
+        Generation  = $generation
+        Destination = Join-Path $root (Join-Path $driveName $relative)
+    }
+}
+
+function Assert-CTQuarantinePathPair {
+    param(
+        [Parameter(Mandatory = $true)][PSObject]$Context,
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $sourceFull = ConvertTo-CTFullPath -Path $Source
+    $destinationFull = ConvertTo-CTFullPath -Path $Destination
+    $sourceVolumeRoot = [IO.Path]::GetPathRoot($sourceFull).TrimEnd('\')
+    $runRoot = ConvertTo-CTFullPath -Path $Context.Root
+    $quarantineRoot = ConvertTo-CTFullPath -Path (Join-Path $Context.Root 'quarantine')
+    if ($sourceFull.TrimEnd('\').Equals($sourceVolumeRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $sourceFull.Equals($runRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $sourceFull.StartsWith($runRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $runRoot.StartsWith($sourceFull + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-CTPathWithinRoot -Path $sourceFull -Root $quarantineRoot -AllowEqual) -or
+        -not (Test-CTPathWithinRoot -Path $destinationFull -Root $quarantineRoot) -or
+        -not [IO.Path]::GetPathRoot($sourceFull).Equals([IO.Path]::GetPathRoot($destinationFull), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Quarantine source or destination escaped its same-volume run boundary.'
+    }
+    if ((Test-CTPathHasReparsePoint -Path $sourceFull) -or
+        (Test-CTPathHasReparsePoint -Path $destinationFull) -or
+        (Test-CTPathHasReparsePoint -Path $quarantineRoot)) {
+        throw 'Quarantine source or destination has a reparse-point ancestor.'
+    }
+}
+
 function Move-CTPathToQuarantine {
     param(
         [Parameter(Mandatory = $true)]
@@ -3630,47 +3870,114 @@ function Move-CTPathToQuarantine {
         [Management.Automation.PSCmdlet]$Caller
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
     $source = ConvertTo-CTFullPath -Path $Path
     if (Test-CTPathIsProtected -Candidate $source -ProtectedPaths $ProtectedPaths) {
         throw "Refusing to quarantine a protected path or its parent: $source"
     }
+    $sourceOperations = @($Context.Operations | Where-Object {
+        $_.Type -eq 'QuarantinePath' -and ([string]$_.Target).Equals($source, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $pending = @($sourceOperations | Where-Object { $_.Status -eq 'Pending' })
+    $completed = @($sourceOperations | Where-Object { $_.Status -eq 'Completed' })
+    if ($pending.Count -gt 1) { throw "Multiple pending quarantine operations exist for: $source" }
+    if ($pending.Count -eq 0 -and -not (Test-Path -LiteralPath $source)) { return }
 
-    if (Test-CTPathHasReparsePoint -Path $source) {
-        throw "Refusing to quarantine a path with a reparse-point ancestor: $source"
+    foreach ($operation in $completed) {
+        $recordedSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+        $recordedDestination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+        if (-not $recordedSource.Equals($source, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Completed quarantine source identity changed: $source"
+        }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $recordedDestination
+        $otherOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and [string]$_.Id -ne [string]$operation.Id -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($recordedDestination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($otherOwners.Count -gt 0) { throw "Completed quarantine destination has another journal owner: $recordedDestination" }
+        if (-not (Test-Path -LiteralPath $recordedDestination)) {
+            throw "A completed quarantine backup is missing; recreated source was preserved: $source"
+        }
     }
 
-    $destination = Get-CTQuarantineDestination -Context $Context -Path $source
-    $quarantineRoot = ConvertTo-CTFullPath -Path (Join-Path $Context.Root 'quarantine')
-    if (-not (Test-CTPathWithinRoot -Path $destination -Root $quarantineRoot)) {
-        throw "Quarantine destination escaped the run directory: $destination"
+    $generation = 'Original'
+    $previousOperationId = $null
+    if ($pending.Count -eq 1) {
+        $operation = $pending[0]
+        $destination = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+        $recordedSource = [string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+        if (-not $recordedSource.Equals($source, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Pending quarantine source identity changed: $source"
+        }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        $otherOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and [string]$_.Id -ne [string]$operation.Id -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($destination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($otherOwners.Count -gt 0) { throw "Pending quarantine destination has another journal owner: $destination" }
+        $sourceExists = Test-Path -LiteralPath $source
+        $destinationExists = Test-Path -LiteralPath $destination
+        if ($sourceExists -and $destinationExists) { throw "Pending quarantine source and destination both exist; merge was refused: $source" }
+        if (-not $sourceExists -and $destinationExists) {
+            Complete-CTOperation -Context $Context -Id ([string]$operation.Id)
+            return
+        }
+        if (-not $sourceExists) { throw "Pending quarantine source and destination are both missing: $source" }
+        $operationId = [string]$operation.Id
+        $generationValue = Get-CTPropertyValue -InputObject $operation.Data -Name 'Generation'
+        if (-not [string]::IsNullOrWhiteSpace([string]$generationValue)) { $generation = [string]$generationValue }
+        $previousOperationId = Get-CTPropertyValue -InputObject $operation.Data -Name 'PreviousOperationId'
     }
-    if (-not ([IO.Path]::GetPathRoot($source).Equals([IO.Path]::GetPathRoot($destination), [StringComparison]::OrdinalIgnoreCase))) {
-        throw "Quarantine must be on the same volume as the source: $source -> $destination"
-    }
-
-    if (Test-Path -LiteralPath $destination) {
-        throw "Quarantine destination already exists: $destination"
+    else {
+        if (-not (Test-Path -LiteralPath $source)) { return }
+        if ($completed.Count -gt 0) {
+            $newDestination = Get-CTRecreatedQuarantineDestination -Context $Context -Path $source
+            $destination = [string]$newDestination.Destination
+            $generation = 'Recreated:' + [string]$newDestination.Generation
+            $previousOperationId = [string]$completed[-1].Id
+        }
+        else { $destination = Get-CTQuarantineDestination -Context $Context -Path $source }
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        $destinationOwners = @($Context.Operations | Where-Object {
+            $_.Type -eq 'QuarantinePath' -and
+            ([string](Get-CTPropertyValue -InputObject $_.Data -Name 'Destination')).Equals($destination, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($destinationOwners.Count -gt 0 -or (Test-Path -LiteralPath $destination)) {
+            throw "Unknown quarantine destination collision: $destination"
+        }
+        $operationId = $null
     }
 
     if (Confirm-CTRequiredOperation -Caller $Caller -Target $source -Action "Move to quarantine: $destination") {
         $parent = Split-Path -Parent $destination
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        $operationId = Start-CTOperation -Context $Context -Type 'QuarantinePath' -Target $source -Data @{
-            Source      = $source
-            Destination = $destination
+        Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+        New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+        if ((Test-CTPathHasReparsePoint -Path $parent) -or (Test-Path -LiteralPath $destination)) {
+            throw "Quarantine destination changed before journaling: $destination"
+        }
+        if ($null -eq $operationId) {
+            $operationId = Start-CTOperation -Context $Context -Type 'QuarantinePath' -Target $source -Data @{
+                Source              = $source
+                Destination         = $destination
+                Generation          = $generation
+                PreviousOperationId = $previousOperationId
+            }
         }
         try {
-            if ((Test-CTPathHasReparsePoint -Path $source) -or (Test-CTPathHasReparsePoint -Path $parent)) {
-                throw 'A reparse point appeared after preflight.'
+            Assert-CTQuarantinePathPair -Context $Context -Source $source -Destination $destination
+            if (Test-Path -LiteralPath $destination) { throw "Quarantine destination collision appeared: $destination" }
+            $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+            if ($sourceItem.PSIsContainer) { [IO.Directory]::Move($source, $destination) }
+            else { [IO.File]::Move($source, $destination) }
+            if ((Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $destination) -or
+                (Test-CTPathHasReparsePoint -Path $destination)) {
+                throw 'Quarantine move did not reach one exact destination.'
             }
-            Move-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
             Complete-CTOperation -Context $Context -Id $operationId
         }
         catch {
+            if ((Test-Path -LiteralPath $source) -and (Test-Path -LiteralPath $destination)) {
+                throw "Quarantine source and destination both exist after move failure; merge was refused: $source"
+            }
             $Context.RebootNeeded = $true
             Add-CTWarning -Context $Context -Message "Could not quarantine $source, usually because it is still loaded. Reboot and run Apply again. $($_.Exception.Message)"
         }
@@ -4813,6 +5120,127 @@ function Remove-CTFirewallRules {
     }
 }
 
+function Get-CTRuntimeDataReferences {
+    param([object[]]$TaskSnapshot)
+    $paths=@('C:\Users\Public\Documents\mirror\FileCrypto','C:\Users\Public\Documents\mirror\PrinterJobLog')
+    $referenced=@{}
+    foreach($path in $paths){$referenced[$path]=$false}
+    $textItems=New-Object Collections.Generic.List[string]
+    try {
+        foreach($service in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
+            $textItems.Add([string]$service.PathName)
+        }
+        foreach($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+            $textItems.Add([string]$process.ExecutablePath)
+            $textItems.Add([string]$process.CommandLine)
+        }
+        foreach($task in @($TaskSnapshot)) {
+            foreach($action in @($task.Actions)) {
+                foreach($field in @('Execute','Arguments','WorkingDirectory')) {
+                    $textItems.Add([string](Get-CTPropertyValue -InputObject $action -Name $field))
+                }
+            }
+        }
+        foreach($class in @('CommandLineEventConsumer','ActiveScriptEventConsumer')) {
+            foreach($consumer in @(Get-CimInstance -Namespace root\subscription -ClassName $class -ErrorAction Stop)) {
+                foreach($field in @('ExecutablePath','CommandLineTemplate','ScriptText')) {
+                    $textItems.Add([string](Get-CTPropertyValue -InputObject $consumer -Name $field))
+                }
+            }
+        }
+        foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce')) {
+            if(-not(Test-Path -LiteralPath $key)){continue}
+            $values=Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+            foreach($property in $values.PSObject.Properties) {
+                if($property.Name -notmatch '^PS'){$textItems.Add([string]$property.Value)}
+            }
+        }
+        foreach($text in $textItems) {
+            $expanded=[Environment]::ExpandEnvironmentVariables($text).Replace('/','\')
+            foreach($path in $paths) {
+                if($expanded.IndexOf($path,[StringComparison]::OrdinalIgnoreCase)-ge0){$referenced[$path]=$true}
+            }
+        }
+        return [pscustomobject]@{Complete=$true;Referenced=$referenced}
+    }
+    catch {return [pscustomobject]@{Complete=$false;Referenced=$referenced}}
+}
+
+function Test-CTPrinterRuntimeLog {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $stream=$null;$reader=$null
+    try {
+        $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        if($stream.Length-gt65536){return $false}
+        $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+        $text=$reader.ReadToEnd()
+        if($text.IndexOf([char]0)-ge0){return $false}
+        $lines=@($text -split '\r?\n' | Where-Object {-not [string]::IsNullOrWhiteSpace($_)})
+        # Empty/blank log files are inert metadata. Nonempty lines must all
+        # match the observed printer-startup messages below.
+        if($lines.Count-gt128){return $false}
+        $patterns=@('^MonitorPrintJobs start\.\.\.$',
+            '^Failed to open registry key, unable to monitor the addition of printer, , errorCode: \[0\]$',
+            '^Find \[[01]\] printers$',
+            '^index:\[0\], printer: \[Microsoft Print to PDF\]$')
+        foreach($line in $lines) {
+            if($line -notmatch '^(?<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<message>.+)$'){return $false}
+            $stamp=$Matches.stamp;$message=$Matches.message;$parsed=[datetime]::MinValue
+            if(-not [datetime]::TryParseExact($stamp,'yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$parsed)){return $false}
+            if(@($patterns|Where-Object {$message -match $_}).Count-eq0){return $false}
+        }
+        return $true
+    }
+    catch {return $false}
+    finally {if($null-ne$reader){$reader.Dispose()}elseif($null-ne$stream){$stream.Dispose()}}
+}
+
+function Get-CTKnownRuntimeDataResidue {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [PSObject]$Context,
+        [Parameter(Mandatory=$true)][PSObject]$Inventory,
+        [Parameter(Mandatory=$true)][bool]$CoreHealthy,
+        [Parameter(Mandatory=$true)][PSObject]$References
+    )
+    $emptyPath='C:\Users\Public\Documents\mirror\FileCrypto'
+    $logPath='C:\Users\Public\Documents\mirror\PrinterJobLog'
+    if($Path -notin @($emptyPath,$logPath) -or $null-eq$Context -or -not $CoreHealthy -or -not $References.Complete){return $null}
+    if(-not $References.Referenced.ContainsKey($Path) -or $References.Referenced[$Path]){return $null}
+    if(@($Inventory.RemovalServices|Where-Object {$_.Present}).Count-gt0 -or
+        @($Inventory.RemovalDrivers|Where-Object {$_.Present}).Count-gt0 -or
+        @($Inventory.KnownCertificates|Where-Object {$_.Present}).Count-gt0 -or
+        @($Inventory.LocalUsers|Where-Object {$_.Name-eq'cloudbase-init'}).Count-gt0 -or
+        @($Inventory.CloudbaseProfiles).Count-gt0){return $null}
+    try {
+        if(Test-CTPathHasReparsePoint -Path $Path){return $null}
+        $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if(-not $item.PSIsContainer){return $null}
+        $evidence=@($Context.Operations|Where-Object {$_.Type-eq'QuarantinePath' -and $_.Status-eq'Completed' -and [string]$_.Target-ieq$Path})
+        $proved=$false
+        foreach($operation in $evidence) {
+            $source=[string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Source')
+            $destination=[string](Get-CTPropertyValue -InputObject $operation.Data -Name 'Destination')
+            if($source-ine$Path){continue}
+            Assert-CTQuarantinePathPair -Context $Context -Source $Path -Destination $destination
+            if(Test-Path -LiteralPath $destination -PathType Container){$proved=$true;break}
+        }
+        if(-not $proved){return $null}
+        $children=@(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+        if($Path-ieq$emptyPath) {
+            # Only the observed truly empty directory is classified as metadata.
+            if($children.Count-ne0){return $null}
+            return [pscustomobject]@{Path=$Path;Kind='EmptyRuntimeDirectory';FileCount=0;Bytes=0}
+        }
+        if($children.Count-eq0){return [pscustomobject]@{Path=$Path;Kind='EmptyRuntimeDirectory';FileCount=0;Bytes=0}}
+        if($children.Count-ne1 -or $children[0].PSIsContainer -or $children[0].Name-ine'printer_jobs.log' -or
+            ($children[0].Attributes-band[IO.FileAttributes]::ReparsePoint) -or
+            -not(Test-CTPrinterRuntimeLog -Path $children[0].FullName)){return $null}
+        return [pscustomobject]@{Path=$Path;Kind='PrinterRuntimeLog';FileCount=1;Bytes=[long]$children[0].Length}
+    }
+    catch {return $null}
+}
+
 function Get-CTVerification {
     param(
         [Parameter(Mandatory = $true)]
@@ -4827,6 +5255,7 @@ function Get-CTVerification {
     $inventory = Get-CTyunTrimInventory -ManifestPath $ManifestPath
     $failures = New-Object Collections.Generic.List[string]
     $warnings = New-Object Collections.Generic.List[string]
+    $runtimeData = New-Object Collections.Generic.List[object]
     try { $taskSnapshot = @(Get-ScheduledTask -ErrorAction Stop) }
     catch { $taskSnapshot = @(); $failures.Add("Scheduled Task verification inventory failed: $($_.Exception.Message)") }
     try { $localUserSnapshot = @(Get-LocalUser -ErrorAction Stop) }
@@ -4867,8 +5296,18 @@ function Get-CTVerification {
         }
     }
 
+    $runtimeReferences=$null
     foreach ($path in $inventory.RemovalPaths) {
         if ($path.Exists) {
+            if([string]$path.Path -in @('C:\Users\Public\Documents\mirror\FileCrypto','C:\Users\Public\Documents\mirror\PrinterJobLog')) {
+                if($null-eq$runtimeReferences){$runtimeReferences=Get-CTRuntimeDataReferences -TaskSnapshot $taskSnapshot}
+                $runtime=Get-CTKnownRuntimeDataResidue -Path ([string]$path.Path) -Context $Context -Inventory $inventory -CoreHealthy ([bool]$coreHealth.Healthy) -References $runtimeReferences
+                if($null-ne$runtime) {
+                    $runtimeData.Add($runtime)
+                    $warnings.Add("Runtime data recreated after component removal: $($runtime.Path) [$($runtime.Kind)]")
+                    continue
+                }
+            }
             $failures.Add("Removal path still exists: $($path.Path)")
         }
     }
@@ -4992,6 +5431,7 @@ function Get-CTVerification {
         Timestamp    = (Get-Date).ToString('o')
         Failures     = @($failures)
         Warnings     = @($warnings)
+        RuntimeData  = $runtimeData.ToArray()
         ManualChecks = @(
             'Disconnect and reconnect with the official CTyun client.',
             'Verify keyboard and mouse input.',
@@ -5500,6 +5940,7 @@ function Invoke-CTApply {
         Remove-CTRunValues -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTStartupApprovedEntries -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTServices -Context $context -Manifest $Manifest -Caller $Caller
+        [void](Finalize-CTOptionalProcessStops -Context $context -Manifest $Manifest -Caller $Caller -WaitSeconds 10)
         $identityResult = Remove-CTCloudbaseIdentity -Context $context -Manifest $Manifest -Caller $Caller
         if ($null -ne $identityResult -and $identityResult.Deferred) {
             $context.Status = 'PendingReboot'
@@ -5639,6 +6080,7 @@ function Invoke-CTPrepare {
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
         Remove-CTScheduledTasks -Context $context -Manifest $Manifest -Caller $Caller
         Stop-CTOptionalProcesses -Context $context -Manifest $Manifest -Caller $Caller
+        [void](Finalize-CTOptionalProcessStops -Context $context -Manifest $Manifest -Caller $Caller -WaitSeconds 0)
         if ($null -ne $identityEvidence) {
             $preparedIdentitySid = [string](Get-CTPropertyValue -InputObject $identityEvidence.Data -Name 'AccountSid')
             if ([string]::IsNullOrWhiteSpace($preparedIdentitySid)) {
@@ -5673,10 +6115,151 @@ function Invoke-CTPrepare {
     }
 }
 
+function Get-CTTrimRunSelection {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string]$BackupRoot
+    )
+
+    $backupRootFull = ConvertTo-CTFullPath -Path $BackupRoot
+    $contexts = New-Object Collections.Generic.List[object]
+    if (Test-Path -LiteralPath $backupRootFull) {
+        if (-not (Test-Path -LiteralPath $backupRootFull -PathType Container) -or
+            (Test-CTPathHasReparsePoint -Path $backupRootFull) -or
+            -not (Test-CTSecureSourcePath -Path $backupRootFull)) {
+            throw 'Trim refused an unsafe or non-directory backup root.'
+        }
+        $entries = @(Get-ChildItem -LiteralPath $backupRootFull -Force -ErrorAction Stop)
+        $unexpected = @($entries | Where-Object { -not $_.PSIsContainer -or $_.Name -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}$' })
+        if ($unexpected.Count -gt 0) { throw 'Trim found an unexpected entry in the dedicated Runs directory.' }
+        foreach ($entry in $entries) {
+            try { $context = Get-CTRunContext -BackupRoot $backupRootFull -RunId ([string]$entry.Name) }
+            catch { throw "Trim found an untrusted or damaged run directory: $($entry.Name)" }
+            if ((Get-CTNormalizedTextHash -Path (ConvertTo-CTFullPath -Path $ManifestPath)) -ne [string]$context.ManifestHash) {
+                throw "Trim run manifest differs from the current immutable manifest: $($entry.Name)"
+            }
+            if ([string]$context.Status -notin @('Prepared','PendingReboot','Failed','Running','Applied')) {
+                throw "Trim found an unsupported run status: $($entry.Name) / $($context.Status)"
+            }
+            $contexts.Add($context)
+        }
+    }
+
+    $guardRunIds = New-Object Collections.Generic.List[string]
+    foreach ($image in $Manifest.ExecutionGuards) {
+        $guard = Get-CTIfEOState -Image $image
+        if (-not $guard.Present) { continue }
+        if ([string]$guard.Debugger -ne $script:GuardDebugger -or [string]$guard.Marker -ne $script:GuardOwner -or
+            [string]$guard.RunId -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}$') {
+            throw "Trim found an unknown or partially owned execution guard: $image"
+        }
+        if (-not $guardRunIds.Contains([string]$guard.RunId)) { $guardRunIds.Add([string]$guard.RunId) }
+    }
+    if ($contexts.Count -gt 1 -or $guardRunIds.Count -gt 1) { throw 'Trim refuses to choose between multiple run histories.' }
+    if ($contexts.Count -eq 0) {
+        if ($guardRunIds.Count -gt 0) { throw 'Trim found owned guards without their trusted run directory.' }
+        return [PSCustomObject]@{ Action='PrepareApply'; Context=$null }
+    }
+
+    $context = $contexts[0]
+    if ($guardRunIds.Count -eq 1 -and [string]$guardRunIds[0] -ne [string]$context.RunId) {
+        throw 'Trim guard ownership does not match the only trusted run.'
+    }
+    $baseline = @($context.Operations | Where-Object { $_.Type -eq 'Baseline' -and $_.Status -eq 'Completed' })
+    $identity = @($context.Operations | Where-Object { $_.Type -eq 'CloudbaseIdentityEvidence' -and $_.Status -eq 'Completed' })
+    if ($baseline.Count -ne 1 -or $identity.Count -ne 1) {
+        throw 'Trim automatic continuation requires one completed baseline and Cloudbase identity record.'
+    }
+    if ([string]$context.Status -eq 'Applied') {
+        return [PSCustomObject]@{ Action='Verify'; Context=$context }
+    }
+    if ([string]$context.Status -eq 'PendingReboot' -and [bool]$context.RebootNeeded) {
+        $currentBoot = [string](Get-CTOperatingSystem).LastBootUpTime
+        $recordedBoot = [string](Get-CTPropertyValue -InputObject $context -Name 'LastBootUpTime')
+        if (-not [string]::IsNullOrWhiteSpace($recordedBoot) -and $recordedBoot -eq $currentBoot) {
+            return [PSCustomObject]@{ Action='RebootRequired'; Context=$context }
+        }
+    }
+    return [PSCustomObject]@{ Action='ResumeApply'; Context=$context }
+}
+
+function New-CTTrimRebootResult {
+    param([Parameter(Mandatory = $true)][PSObject]$Context)
+
+    return [PSCustomObject]@{
+        SourceMode = 'Trim'
+        RunId = [string]$Context.RunId
+        Status = 'PendingReboot'
+        RebootNeeded = $true
+        WarningCount = @($Context.Warnings).Count
+        Warnings = @($Context.Warnings)
+        NextCommand = '.\Trim.cmd -Force'
+    }
+}
+
+function Set-CTTrimResultMetadata {
+    param([Parameter(Mandatory = $true)][PSObject]$Result)
+
+    $Result | Add-Member -NotePropertyName SourceMode -NotePropertyValue 'Trim' -Force
+    $Result | Add-Member -NotePropertyName NextCommand -NotePropertyValue '.\Trim.cmd -Force' -Force
+    return $Result
+}
+
+function Invoke-CTTrimWorkflow {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [string]$LgpoPath,
+        [Parameter(Mandatory = $true)][Management.Automation.PSCmdlet]$Caller
+    )
+
+    $selection = Get-CTTrimRunSelection -Manifest $Manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot
+    Add-CTDiagnosticEvent -Stage 'Trim' -Message 'Trim workflow state was confirmed.' -Data @{ Status=[string]$selection.Action }
+    switch ([string]$selection.Action) {
+        'PrepareApply' {
+            $prepared = Invoke-CTPrepare -Manifest $Manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot -LgpoPath $LgpoPath -Caller $Caller
+            $runId = [string](Get-CTPropertyValue -InputObject $prepared -Name 'RunId')
+            if ($runId -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}$' -or [string](Get-CTPropertyValue -InputObject $prepared -Name 'Status') -ne 'Prepared') {
+                throw 'Trim Prepare did not return one valid Prepared RunId.'
+            }
+            $applied = Invoke-CTApply -Manifest $Manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $runId -Caller $Caller
+            return Set-CTTrimResultMetadata -Result $applied
+        }
+        'ResumeApply' {
+            $applied = Invoke-CTApply -Manifest $Manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId ([string]$selection.Context.RunId) -Caller $Caller
+            return Set-CTTrimResultMetadata -Result $applied
+        }
+        'RebootRequired' { return New-CTTrimRebootResult -Context $selection.Context }
+        'Verify' {
+            $verification = Get-CTVerification -Manifest $Manifest -ManifestPath ([string]$selection.Context.ManifestPath) -Context $selection.Context
+            Add-CTDiagnosticEvent -Level $(if($verification.Passed){'Info'}else{'Error'}) -Stage 'Verification' -Message $(if($verification.Passed){'Verification passed.'}else{'Verification failed.'}) -Data @{
+                Passed=[bool]$verification.Passed; FailureCount=@($verification.Failures).Count; WarningCount=@($verification.Warnings).Count
+            }
+            return [PSCustomObject]@{
+                SourceMode = 'Trim'
+                RunId = [string]$selection.Context.RunId
+                Status = 'Applied'
+                Passed = [bool]$verification.Passed
+                RebootNeeded = $false
+                WarningCount = @($verification.Warnings).Count
+                Failures = @($verification.Failures)
+                Warnings = @($verification.Warnings)
+                ManualChecks = @($verification.ManualChecks)
+                RuntimeData = @($verification.RuntimeData)
+                Inventory = $verification.Inventory
+                NextCommand = '.\Trim.cmd -Force'
+            }
+        }
+        default { throw 'Trim produced an unsupported workflow selection.' }
+    }
+}
+
 function Invoke-CTyunTrim {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
-        [ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify')]
+        [ValidateSet('Audit', 'Plan', 'Prepare', 'Apply', 'Verify', 'Trim')]
         [string]$Mode = 'Audit',
 
         [Parameter(Mandatory = $true)]
@@ -5711,7 +6294,7 @@ function Invoke-CTyunTrim {
         return $result
     }
 
-    if ($Mode -eq 'Plan' -or ($Mode -eq 'Apply' -and $WhatIfPreference)) {
+    if ($Mode -eq 'Plan' -or ($Mode -in @('Apply','Trim') -and $WhatIfPreference)) {
         $result = Get-CTPlan -Manifest $manifest
         Add-CTDiagnosticEvent -Stage 'Invocation' -Message 'Plan completed.' -Data @{ ActionCount = @($result).Count }
         if ($Json) { return ($result | ConvertTo-Json -Depth 6) }
@@ -5743,6 +6326,13 @@ function Invoke-CTyunTrim {
         return $result
     }
 
+    if ($Mode -eq 'Trim' -and -not [string]::IsNullOrWhiteSpace($RunId)) {
+        throw 'Trim selects only a unique trusted run automatically; use Apply or Verify for an explicit RunId.'
+    }
+    if ($Mode -eq 'Trim' -and $Restart) {
+        throw 'Trim never restarts Windows automatically; reboot explicitly when it returns PendingReboot.'
+    }
+
     if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
         throw "$Mode requires 64-bit Windows PowerShell 5.1 Desktop Edition. Use Start-CTyunTrim.cmd."
     }
@@ -5759,9 +6349,10 @@ function Invoke-CTyunTrim {
     $mutex = New-Object Threading.Mutex($false, 'Global\CTyunTrim')
     $lockTaken = $false
     try {
-        $lockTaken = $mutex.WaitOne(0)
+        try { $lockTaken = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $lockTaken = $true }
         if (-not $lockTaken) {
-            throw 'Another CTyunTrim Prepare or Apply operation is already running.'
+            throw 'Another CTyunTrim Prepare, Apply or Trim operation is already running.'
         }
 
         if ($Mode -eq 'Prepare') {
@@ -5769,6 +6360,9 @@ function Invoke-CTyunTrim {
         }
         elseif ($Mode -eq 'Apply') {
             $result = Invoke-CTApply -Manifest $manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot -LgpoPath $LgpoPath -RunId $RunId -Caller $PSCmdlet
+        }
+        elseif ($Mode -eq 'Trim') {
+            $result = Invoke-CTTrimWorkflow -Manifest $manifest -ManifestPath $ManifestPath -BackupRoot $BackupRoot -LgpoPath $LgpoPath -Caller $PSCmdlet
         }
         if ($Restart) {
             Restart-Computer -Force

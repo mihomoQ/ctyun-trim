@@ -5,7 +5,9 @@ CTyunTrim 是一个非官方、审计优先、可重复执行的 Windows PowerSh
 > [!CAUTION]
 > CTyunTrim 会以管理员权限处理服务、驱动、计划任务、账户、证书、本地组策略和程序目录。识别错误可能导致天翼连接、键鼠、剪贴板、文件传输、网络、Windows Update 或系统启动失败。运行前必须创建可用的云主机快照、备份重要数据，并准备不依赖待处理组件的恢复入口。
 
-当前状态：**Experimental / 0.1.5-Diagnostic**。仅针对已记录的 Windows 11 LTSC/ReviOS 与天翼组件组合设计，尚未在新的原厂镜像上完成端到端验证。
+当前状态：**Experimental / 0.1.7-Diagnostic**。针对已记录的 Windows 11/ReviOS 与天翼组件组合，保持已验证互通核心；其他镜像需要先核验。
+
+0.1.7 已在用户提供初始快照的原厂＋ReviOS 系统上完成完整精简、三次重启、幂等与负向验证；用户确认重连、键鼠、双向文本剪贴板和普通 TXT/ZIP 互传正常。范围与限制见 [实机测试记录](docs/TEST-RESULTS-0.1.7.md)。
 
 ## 项目目标
 
@@ -47,6 +49,20 @@ CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 Re
 
 请下载完整 Release 并核验 SHA-256。不要使用 `irm ... | iex` 一类远程管道直接执行。
 
+### 常用入口：同一条命令
+
+在完成 ReviOS、已备份的测试系统上，以管理员身份运行：
+
+```powershell
+.\Trim.cmd -Force
+```
+
+首次执行会建立备份并自动衔接 Prepare/Apply。如果返回 `PendingReboot`，重启后再次运行同一条命令。它只会选择本机唯一可信的运行记录，不需要手动抄 RunId；若有多个记录或记录损坏会明确停止。已经完成的运行只做 Verify，不重新删除。
+
+可加 `-Diagnostic -Json` 获取诊断结果，也可用 `-WhatIf` 预览。原有 Audit、Prepare、Apply、Verify 入口仍可用于分阶段排查或在 ReviOS 之前处理假 WSUS。
+
+### 手动分阶段入口
+
 打开 64 位管理员 PowerShell：
 
 ```powershell
@@ -86,7 +102,9 @@ CTyunTrim 不是通用 Windows 精简工具，不替代 ReviOS，也不修改 Re
 
 0.1.5 为这个已观察到的状态增加了受限的过渡步骤：仅在同 RunId 续跑、唯一预检错误是 Profile/hive 已加载、基线身份和互通核心有效、该 SID 没有进程，且精确 `cloudbase-init` 服务为 `Stopped / Auto` 并使用该 SID 时，Apply 才会独立备份服务配置、记录 `ServiceQuiesce` 操作并将此服务启动类型改为 `Disabled`。当次立即返回 `PendingReboot`，不会继续删除组件。账户、Profile、hive 和任务在此步骤均不修改。
 
-重启后，用 0.1.5 和原 RunId 再次运行 Apply；只有 Profile/hive 已自然卸载且所有原有预检通过，才会进入完整精简。如果停用服务并重启后仍加载，脚本继续阻断，不自动扩大停用范围。0.1.4 创建的 RunId 可直接续用，移除清单及其固定哈希未改变。进入 0.1.5 续跑后请继续使用该版本，避免旧版本无法理解新增操作记录。
+重启后，用当前完整版本和原 RunId 再次运行 Apply；只有 Profile/hive 已自然卸载且所有原有预检通过，才会进入完整精简。如果停用服务并重启后仍加载，脚本继续阻断，不自动扩大停用范围。0.1.4/0.1.5 创建的 RunId 可直接续用，移除清单及其固定哈希未改变。续跑时不要降回旧版本。
+
+0.1.6 支持已备份的源目录在重启后重新出现：新目录内容保存到独立的隔离子目录，旧备份保留原样，不会因备份位置已存在而卡住，也不会覆盖或合并备份。
 
 如果 Apply 返回 `PendingReboot`，重启后必须使用同一个 RunId 续跑，避免把一次变更拆成多个无法统一恢复的备份：
 
@@ -161,6 +179,8 @@ Apply 会返回 `RunId` 和备份目录。0.1.5 暂不提供自动 Restore：安
 - 六个有意创建的 IFEO 防自愈项仍匹配本工具标记；
 - `cloudbase-init` 账户和 Profile 已消失。
 - 已知失效程序路径的入站 Allow 防火墙规则已消失；Block 规则保留。
+
+0.1.7 会单独报告两类已识别运行时数据：完成组件清理后重建的完全空 `mirror\FileCrypto`，以及 `mirror\PrinterJobLog` 中唯一的空白或已识别打印机初始化日志。只有核心正常、组件/证书/身份已清、已有可信隔离记录、没有路径执行引用且内容检查通过时，才计为 Warning 而非组件恢复。任何额外文件、链接、未知日志内容或查询不完整仍会使 Verify 失败；移除清单本身没有放宽。
 
 必须向 `Verify` 传入对应 RunId，才能按 Prepare 时存档的 SID 检出后来被改名的 Cloudbase 账户；不传 RunId 的只读报告会明确判定为未完成验证。
 只要 `Passed` 为 false，入口脚本也会返回失败退出状态，便于 CI 或批处理正确拦截。

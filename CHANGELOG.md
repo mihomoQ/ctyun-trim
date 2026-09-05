@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.7-Diagnostic - 2026-09-05
+
+- Added `Trim.cmd -Force`: automatically chains the first Prepare/Apply and resumes only one trusted local run; an already-applied run is verified without replaying cleanup. Ambiguous or damaged histories are not guessed.
+- Batched optional process stop requests into shared wait windows, rechecked process identities and late respawns, and reconciled stale pending stop records before final status reporting.
+- Classified only two observed post-cleanup runtime data paths separately from executable component restoration. Content, reference, prior-quarantine, core-health and component-absence checks remain mandatory; unknown content still fails verification.
+- Kept existing component manifest hashes and explicit per-mode entry points compatible.
+
+## 0.1.6-Diagnostic - 2026-09-05
+
+- Fixed resumed Apply when an already-quarantined source directory reappears after reboot. Each new copy receives a separate quarantine generation; previous backups remain unchanged.
+- Pending moves reuse their recorded destination. Unknown collisions and ambiguous source/destination states stop without overwriting or merging data.
+- Replaced PowerShell move semantics with non-overwriting file/directory renames, with matching resume validation and real-filesystem regression tests.
+- Kept the immutable removal manifest and existing RunId compatibility unchanged.
+
 ## 0.1.5-Diagnostic - 2026-09-05
 
 - Added a resume-only service quiesce stage for the observed loaded Cloudbase Profile with zero SID-owned processes and the exact stopped, automatic Cloudbase service. A protected write-ahead record and separate registry backup precede disabling only that service's startup; the invocation returns `PendingReboot` without entering removal.

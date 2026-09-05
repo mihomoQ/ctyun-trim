@@ -87,7 +87,7 @@ $accountRemovalPosition = $sourceText.IndexOf('Remove-LocalUser -SID $account.SI
 Assert-CT -Condition ($accountDisablePosition -ge 0 -and $profileRemovalPosition -gt $accountDisablePosition -and $accountRemovalPosition -gt $profileRemovalPosition) -Message 'Cloudbase identity order must confirm/disable the account, remove the unloaded Profile, then remove the account.'
 Assert-CT -Condition ($profileProcessBoundaryPosition -ge 0 -and $profileDeletePosition -gt $profileProcessBoundaryPosition) -Message 'Cloudbase Profile deletion lacks a final owner-SID process boundary check.'
 Assert-CT -Condition ($sourceText -match 'Disable-LocalUser -SID \$account\.SID -ErrorAction Stop') -Message 'Cloudbase account disable is not fail-closed.'
-Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.5') -Message 'ModuleVersion is not 0.1.5.'
+Assert-CT -Condition ([string]$moduleManifest.ModuleVersion -eq '0.1.7') -Message 'ModuleVersion is not 0.1.7.'
 Assert-CT -Condition ([string]$moduleManifest.PrivateData.PSData.Prerelease -eq 'Diagnostic') -Message 'Module prerelease label is not Diagnostic.'
 Assert-CT -Condition (@($moduleManifest.FunctionsToExport) -contains 'New-CTyunTrimDiagnosticBundle') -Message 'Diagnostic bundle exporter is not declared in the module manifest.'
 $diagnosticResultSafety = & (Get-Module CTyunTrim) {
